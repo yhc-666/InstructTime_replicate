@@ -1,3 +1,23 @@
+"""
+作用: 提供多种时间序列领域的评估指标计算函数，用于模型性能评估
+输入: 
+    - 模型预测结果(文本形式)
+    - 真实标签
+    - logger对象(用于记录)
+输出: 
+    - 评估分数(根据领域不同有不同指标)
+    - 详细的评估报告(记录在日志中)
+示例用法:
+    # 评估心电图(ECG)数据的分类结果
+    score, report, matrix = metric_ecg(predictions, ground_truth, logger)
+    
+    # 评估脑电图(EEG)数据的分类结果
+    score, report, matrix = metric_eeg(predictions, ground_truth, logger)
+    
+    # 评估人体活动识别(HAR)结果
+    score, report, matrix = metric_har(predictions, ground_truth, logger)
+"""
+
 import numpy as np
 import pandas as pd
 from challeng_score import evaluate_model

@@ -1,3 +1,19 @@
+"""
+作用: 提供InstructTime项目通用工具函数，包括模型加载、文本处理和辅助函数
+输入: 
+    - 各种需要处理的数据和文件路径
+    - 模型参数和配置
+输出: 
+    - 加载好的模型组件
+    - 处理后的文本和数据
+示例用法:
+    # 加载时间序列tokenizer
+    tokenizer = load_TStokenizer(dir_path="./model_path", data_shape=(5000, 12), device="cuda:0")
+    
+    # 从文本中提取信息
+    diagnosis, stage, har, fd, rwc = extract_all_information(text)
+"""
+
 import os
 import torch
 import json

@@ -1,3 +1,21 @@
+"""
+作用: 提供多种时间序列数据的预处理功能，包括ECG、EEG、HAR等领域数据的标准化、去噪、提取和格式化
+输入: 
+    - 各种格式的原始时间序列数据文件
+    - 标签和注释文件
+输出: 
+    - 预处理后的样本列表，每个样本包含(文本指令, 时间序列数据, 标签)
+示例用法:
+    # 处理心电图数据
+    ecg_samples = process_ecg(data_folder='./data/ecg_data', only_label=False)
+    
+    # 处理脑电图数据
+    eeg_samples = process_eeg(data_folder='./data/sleep-edf-database-1.0.0')
+    
+    # 处理人体活动识别数据
+    har_samples = process_har(data_folder='./data/HAR')
+"""
+
 import os, re
 import ast,math, sys
 import pywt, wfdb
@@ -1546,116 +1564,6 @@ def process_label_info(Path='./whale_no_big'):
         pickle.dump(samples_test, file)
 
     return samples_train, samples_test
-
-def process_label_info(Path='./whale_no_big'):
-    train_path = os.path.join(Path, 'samples_train.pkl')
-    test_path = os.path.join(Path, 'samples_test.pkl')
-	
-    samples_train = []
-    samples_test = []
-    if os.path.isfile(train_path) and os.path.isfile(test_path):
-        with open(train_path, 'rb') as file:
-            samples_train = pickle.load(file)
-        with open(test_path, 'rb') as file:
-            samples_test = pickle.load(file)
-
-    for i, sample in enumerate(samples_train):
-        text, ecg, label = sample
-        modified_text = remove_line(text, 0)
-        samples_train[i] = (modified_text, ecg, label)
-
-    # 对测试数据集执行相同的操作
-    for i, sample in enumerate(samples_test):
-        text, ecg, label = sample
-        modified_text = remove_line(text, 0)
-        samples_test[i] = (modified_text, ecg, label)
-
-    with open('samples_train.pkl', 'wb') as file:
-        pickle.dump(samples_train, file)
-    with open('samples_test.pkl', 'wb') as file:
-        pickle.dump(samples_test, file)
-
-    return samples_train, samples_test
-
-def extract_from_text(text, keyword):
-    index = text.find(keyword)
-    if index != -1:
-        return text[index + len(keyword):] 
-    return ""
-
-def extract_all_information(text):
-    # 合并搜索，一次性提取所有信息
-    diagnosis = stage = har = dev = whale = ""
-    if "include(s)" in text:
-        diagnosis = extract_from_text(text, "include(s) ")
-    elif "pattern is" in text:
-        stage = extract_from_text(text, "pattern is ")
-    elif "engaged in" in text:
-        har = extract_from_text(text, "engaged in ")
-    elif "conditions:" in text:
-        dev = extract_from_text(text, "conditions: ")
-    elif "originates from" in text:
-        whale = extract_from_text(text, "originates from ")
-    return diagnosis, stage, har, dev, whale
-
-def read_and_modify_last_line(input_string, modification_function):
-    # 将输入字符串拆分成行
-    lines = input_string.split('\n')
-    
-    # 如果字符串为空或只有一行，直接替换为修改后的行
-    if len(lines) <= 1:
-        return modification_function(lines[0])
-    
-    # 读取最后一行并进行修改
-    last_line = lines[-1]
-    diagnosis, stage, har, dev, whale = extract_all_information(last_line)
-    
-    if diagnosis:
-        lines[-1] = diagnosis
-    elif stage:
-        lines[-1] = stage
-    elif har:
-        lines[-1] = har
-    elif dev:
-        lines[-1] = dev        
-    elif whale:
-        lines[-1] = whale        
-    
-    # 重新组合所有行并返回
-    modified_string = '\n'.join(lines)
-    return modified_string
-
-def process_word_info(Path='./ecg_no_big'):
-    train_path = os.path.join(Path, 'samples_train.pkl')
-    test_path = os.path.join(Path, 'samples_test.pkl')
-	
-    samples_train = []
-    samples_test = []
-    if os.path.isfile(train_path) and os.path.isfile(test_path):
-        with open(train_path, 'rb') as file:
-            samples_train = pickle.load(file)
-        with open(test_path, 'rb') as file:
-            samples_test = pickle.load(file)
-
-    for i, sample in enumerate(samples_train):
-        text, ecg, label = sample
-        modified_text = read_and_modify_last_line(text, 0)
-        samples_train[i] = (modified_text, ecg, label)
-
-    # 对测试数据集执行相同的操作
-    for i, sample in enumerate(samples_test):
-        text, ecg, label = sample
-        modified_text = read_and_modify_last_line(text, 0)
-        samples_test[i] = (modified_text, ecg, label)
-
-    with open('samples_train.pkl', 'wb') as file:
-        pickle.dump(samples_train, file)
-    with open('samples_test.pkl', 'wb') as file:
-        pickle.dump(samples_test, file)
-
-    return samples_train, samples_test
-
-import csv
 
 def process_zero_shot_info(Path='./ecg_no_big'):
     train_path = os.path.join(Path, 'samples_train.pkl')

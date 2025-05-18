@@ -1,3 +1,15 @@
+"""
+作用: 定义InstructTime主模型架构，结合预训练的GPT2模型和时间序列tokenizer创建多模态模型
+输入: 
+    - GPT2Config配置
+    - 时间序列tokenizer列表
+    - 文本embedding大小
+输出: 
+    - InstructTime模型实例，能够同时处理文本和时间序列token
+示例CLI:
+    python run_truth_loss.py --device "cuda:0" --dataset "mix" --batch_size 16 --lr 1e-5 --epochs 10
+"""
+
 import torch
 import copy
 import torch.nn as nn

@@ -1,3 +1,17 @@
+"""
+作用: 定义多领域数据加载类，处理时间序列和文本指令的结合，支持多种时间序列数据类型
+输入: 
+    - 样本列表(包含文本指令、时间序列数据和标签)
+    - tokenizer实例
+    - 运行模式(训练/测试)
+    - 多模态类型标识
+输出: 
+    - 格式化的数据批次，包含input_ids, attention_masks和labels
+示例用法:
+    dataset = MultiDataset(samples, tokenizer, mode="train", multi="ecg", encoder_max_length=256)
+    dataloader = DataLoader(dataset, batch_size=16, collate_fn=collate_fn_train)
+"""
+
 import torch
 from torch.utils.data import Dataset
     

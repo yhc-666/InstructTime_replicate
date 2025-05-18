@@ -1,3 +1,20 @@
+"""
+作用: InstructTime模型训练和推理的主入口脚本，实现了训练、验证和测试流程
+输入: 
+    - 预处理后的数据
+    - 预训练的GPT2模型
+    - 训练好的TStokenizer模型
+输出: 
+    - 训练好的InstructTime模型
+    - 评估结果和预测
+示例CLI:
+    # 训练Universal模型
+    python run_truth_loss.py --device "cuda:0" --dataset "mix" --batch_size 16 --lr 1e-5 --epochs 15 --adapt False
+    
+    # 训练Adapt模型
+    python run_truth_loss.py --device "cuda:0" --dataset "ecg" --batch_size 16 --lr 1e-5 --epochs 10 --adapt True --load_model_path "./gptmodel"
+"""
+
 import os
 import torch
 import random
