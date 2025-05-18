@@ -249,10 +249,16 @@ class Quantize(nn.Module):
     # -------------------------------------------------------------------
     # forward: 离散化 + (训练时) EMA 更新
     # -------------------------------------------------------------------
-    def forward(self, input):
-        """
-        input  : [..., dim]
-        返回   : quantize[... ,dim], diff, embed_ind[...]
+    def forward(self, input, mask=None):
+        """Quantize hidden representations with optional padding mask.
+
+        Parameters
+        ----------
+        input : tensor[... , dim]
+            Input features.
+        mask : tensor[..., optional]
+            Float mask aligned with the token dimension. ``1`` indicates
+            valid positions.
         """
 
         # --------1. 计算最近邻 codeword---------------------------------
@@ -286,10 +292,13 @@ class Quantize(nn.Module):
 
         # ----------------2. 训练模式下用 EMA 更新 codebook --------------
         if self.training:
-            # Σ_onehot_k   → 统计每个 codeword 被选次数
-            embed_onehot_sum = embed_onehot.sum(0)                  # [n_embed]
-            # Σ_x(k)       → 每个 codeword 聚类质心的累加向量
-            embed_sum = flatten.transpose(0, 1) @ embed_onehot     # [dim, n_embed]
+            if mask is not None:
+                mask_flat = mask.reshape(-1).unsqueeze(1)
+                embed_onehot_sum = (embed_onehot * mask_flat).sum(0)
+                embed_sum = (flatten * mask_flat).transpose(0, 1) @ embed_onehot
+            else:
+                embed_onehot_sum = embed_onehot.sum(0)
+                embed_sum = flatten.transpose(0, 1) @ embed_onehot
 
             # EMA 更新
             self.cluster_size.data.mul_(self.decay).add_(
@@ -311,10 +320,14 @@ class Quantize(nn.Module):
             self.embed.data.copy_(embed_normalized)
 
         # ----------------3. 计算 VQ 损失 (MSE) --------------------------
-        # codebook loss:   不传梯度到 encoder，只调 codebook
-        codebook_loss = (quantize.detach() - input).pow(2).mean()
-        # commitment loss: 不传梯度到 codebook，只调 encoder
-        commit_loss   = (quantize - input.detach()).pow(2).mean()
+        if mask is not None:
+            mask_exp = mask.unsqueeze(-1)
+            mask_sum = mask_exp.sum()
+            codebook_loss = ((quantize.detach() - input).pow(2) * mask_exp).sum() / mask_sum
+            commit_loss = ((quantize - input.detach()).pow(2) * mask_exp).sum() / mask_sum
+        else:
+            codebook_loss = (quantize.detach() - input).pow(2).mean()
+            commit_loss = (quantize - input.detach()).pow(2).mean()
 
         diff = codebook_loss + self.beta * commit_loss      # scalar
 
@@ -354,7 +367,7 @@ class Encoder(nn.Module):
         self.blocks = TCN(args=None, d_model=hidden_dim, block_num=block_num, data_shape=data_shape,
                           dilations=dilations)
 
-    def forward(self, input):
+    def forward(self, input, mask=None):
         """
         功能: 编码器前向传播
         输入:
@@ -454,15 +467,20 @@ class TStokenizer(nn.Module):
             3. 量化模块将连续特征转换为离散码本索引
             4. 解码器重建原始序列
         """
-        enc = self.enc(input) # (B,   L,   D)  
+        enc = self.enc(input) # (B,   L,   D)
         # patching: 通过2D conv 进行, 把 时间维 和 隐藏通道维 当作一张 2-D “图片” 的高×宽来切 patch
         enc = enc.unsqueeze(1) # (B, 1, L,   D)  ← N,C,H,W  视角
         quant = self.quantize_input(enc)  # (B, D, L/32, 1) ← 每个 filter = 一个 32×64 patch
         quant = quant.squeeze(-1) # (B, D, L/32)
-        quant = quant.transpose(1, 2) # (B, L/32,   D)  ← token 序列 
-        quant, diff, id = self.quantize(quant) 
-        quant = self.quantize_output(quant) 
-        dec = self.dec(quant) 
+        quant = quant.transpose(1, 2) # (B, L/32,   D)  ← token 序列
+        mask_patch = None
+        if mask is not None:
+            # mask: [B, L, 1]
+            patch = self.wave_patch[0]
+            mask_patch = mask.view(mask.size(0), -1, patch).float().mean(dim=2)
+        quant, diff, id = self.quantize(quant, mask_patch)
+        quant = self.quantize_output(quant)
+        dec = self.dec(quant)
 
         return dec, diff, id
     

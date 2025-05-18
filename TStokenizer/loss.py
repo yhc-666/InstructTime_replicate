@@ -20,7 +20,7 @@ class MSE:
         self.latent_loss_weight = latent_loss_weight
         self.mse = nn.MSELoss()
 
-    def compute(self, batch):
+    def compute(self, batch, mask=None):
         """
         功能: 计算模型的总损失
         输入:
@@ -35,11 +35,12 @@ class MSE:
         """
         seqs = batch
         # 前向传播，得到重构结果、latent损失和token索引
-        out, latent_loss, _ = self.model(seqs)
-        # 计算重构损失：原始输入与重构输出的MSE
-        recon_loss = self.mse(out, seqs)
-        # 计算latent损失均值
+        out, latent_loss, _ = self.model(seqs, mask=mask)
+
+        if mask is not None:
+            recon_loss = ((out - seqs) ** 2 * mask).sum() / mask.sum()
+        else:
+            recon_loss = self.mse(out, seqs)
         latent_loss = latent_loss.mean()
-        # 计算总损失：重构损失 + 加权latent损失
         loss = recon_loss + self.latent_loss_weight * latent_loss
         return loss

@@ -65,9 +65,9 @@ def main():
     train_loader = Data.DataLoader(train_dataset, batch_size=args.train_batch_size, shuffle=True)
     args.data_shape = train_dataset.shape()
     
-    # 加载测试数据集
-    test_dataset = Dataset(device=args.device, mode='test', args=args)
-    test_loader = Data.DataLoader(test_dataset, batch_size=args.test_batch_size)
+    # 加载验证数据集
+    val_dataset = Dataset(device=args.device, mode='test', args=args)
+    val_loader = Data.DataLoader(val_dataset, batch_size=args.test_batch_size)
     print(args.data_shape)
     print('dataset initial ends')
 
@@ -82,7 +82,7 @@ def main():
     print('model initial ends')
 
     # 创建训练器对象，管理训练和评估流程
-    trainer = Trainer(args, model, train_loader, test_loader, verbose=True)
+    trainer = Trainer(args, model, train_loader, val_loader, verbose=True)
     print('trainer initial ends')
 
     # 开始训练过程
