@@ -12,7 +12,7 @@
         args=args,                 # 参数配置
         model=model,               # TStokenizer模型实例
         train_loader=train_loader, # 训练数据加载器
-        test_loader=test_loader,   # 测试数据加载器
+        val_loader=val_loader,     # 验证数据加载器
         verbose=True               # 是否显示详细信息
     )
     trainer.train()  # 开始训练流程
@@ -28,14 +28,14 @@ class Trainer():
     """
     功能: 训练管理器，控制VQVAE模型的训练和评估流程
     """
-    def __init__(self, args, model, train_loader, test_loader, verbose=False):
+    def __init__(self, args, model, train_loader, val_loader, verbose=False):
         """
         功能: 初始化训练管理器
         输入:
             - args: 参数配置对象
             - model: VQVAE模型实例
             - train_loader: 训练数据加载器
-            - test_loader: 测试数据加载器
+            - val_loader: 验证数据加载器
             - verbose: 是否显示详细信息
         """
         self.args = args
@@ -45,7 +45,7 @@ class Trainer():
         self.model = model.to(torch.device(self.device))
 
         self.train_loader = train_loader
-        self.test_loader = test_loader
+        self.val_loader = val_loader
         self.lr_decay = args.lr_decay_rate  # 学习率衰减比例
         self.lr_decay_steps = args.lr_decay_steps  # 学习率衰减步数
         self.weight_decay = args.weight_decay  # 权重衰减率
@@ -121,8 +121,11 @@ class Trainer():
         for idx, batch in enumerate(tqdm_dataloader):
             # 清空梯度
             self.optimizer.zero_grad()
-            # 计算损失(包含重构损失和codebook损失)
-            loss = self.cr.compute(batch)
+            if isinstance(batch, (list, tuple)):
+                seqs, mask, _ = batch
+            else:
+                seqs, mask = batch, None
+            loss = self.cr.compute(seqs, mask)
             loss_sum += loss.item()
 
             # 反向传播
@@ -177,13 +180,16 @@ class Trainer():
             - MSE取负值是因为训练器会选择较大的指标值作为"更好"
         """
         self.model.eval()
-        tqdm_data_loader = tqdm(self.test_loader) if self.verbose else self.test_loader
+        tqdm_data_loader = tqdm(self.val_loader) if self.verbose else self.val_loader
         metrics = {'mse': 0}
 
         with torch.no_grad():
             for idx, batch in enumerate(tqdm_data_loader):
-                # 计算MSE损失(不计算梯度)
-                mse = self.cr.compute(batch)
+                if isinstance(batch, (list, tuple)):
+                    seqs, mask, _ = batch
+                else:
+                    seqs, mask = batch, None
+                mse = self.cr.compute(seqs, mask)
                 # 注意这里取负值，因为评估选择较大的指标值作为"更好"
                 metrics['mse'] -= mse
         # 计算平均指标
