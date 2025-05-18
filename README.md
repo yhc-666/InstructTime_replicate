@@ -62,7 +62,7 @@ python main.py \
 ### Train ICU Codebook
 
 ```bash
-python icu_codebook.py --data_root PATH_TO_DATA --device cuda:0 \
+python train_icu_codebook.py --data_root PATH_TO_DATA --device cuda:0 \
     --save_path ./vq.ckpt --epochs 30 --lr 1e-3
 ```
 

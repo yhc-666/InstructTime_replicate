@@ -1,0 +1,48 @@
+{
+  "os": "macOS-13.3-arm64-arm-64bit",
+  "python": "CPython 3.11.11",
+  "startedAt": "2025-05-18T17:05:51.744638Z",
+  "args": [
+    "--smoke_test",
+    "--use_wandb"
+  ],
+  "program": "/Users/haochengyang/Desktop/ts+text research/codes/InstructTime_replicate/train_icu_codebook.py",
+  "codePath": "train_icu_codebook.py",
+  "git": {
+    "remote": "https://github.com/yhc-666/InstructTime_replicate.git",
+    "commit": "a30a58ce38aa92b299fe50711f40ac54c46cc9d9"
+  },
+  "email": "e1264829@u.nus.edu",
+  "root": "/Users/haochengyang/Desktop/ts+text research/codes/InstructTime_replicate",
+  "host": "HAOCHENGdeMacBook-Pro-2.local",
+  "executable": "/opt/miniconda3/envs/instructime/bin/python",
+  "codePathLocal": "train_icu_codebook.py",
+  "cpu_count": 10,
+  "cpu_count_logical": 10,
+  "disk": {
+    "/": {
+      "total": "494384795648",
+      "used": "280619667456"
+    },
+    "/System/Volumes/Data": {
+      "total": "494384795648",
+      "used": "280619667456"
+    }
+  },
+  "memory": {
+    "total": "17179869184"
+  },
+  "cpu": {
+    "count": 10,
+    "countLogical": 10
+  },
+  "apple": {
+    "name": "Apple M2 Pro",
+    "ecpuCores": 4,
+    "pcpuCores": 6,
+    "gpuCores": 16,
+    "memoryGb": 16,
+    "swapTotalBytes": "8589934592",
+    "ramTotalBytes": "17179869184"
+  }
+}

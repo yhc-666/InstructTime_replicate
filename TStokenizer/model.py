@@ -452,7 +452,7 @@ class TStokenizer(nn.Module):
         """
         return 'vqvae'
 
-    def forward(self, input):
+    def forward(self, input, mask=None):
         """
         功能: VQVAE模型前向传播
         输入:
@@ -467,7 +467,7 @@ class TStokenizer(nn.Module):
             3. 量化模块将连续特征转换为离散码本索引
             4. 解码器重建原始序列
         """
-        enc = self.enc(input) # (B,   L,   D)
+        enc = self.enc(input, mask) # (B,   L,   D)
         # patching: 通过2D conv 进行, 把 时间维 和 隐藏通道维 当作一张 2-D “图片” 的高×宽来切 patch
         enc = enc.unsqueeze(1) # (B, 1, L,   D)  ← N,C,H,W  视角
         quant = self.quantize_input(enc)  # (B, D, L/32, 1) ← 每个 filter = 一个 32×64 patch
@@ -476,8 +476,9 @@ class TStokenizer(nn.Module):
         mask_patch = None
         if mask is not None:
             # mask: [B, L, 1]
-            patch = self.wave_patch[0]
-            mask_patch = mask.view(mask.size(0), -1, patch).float().mean(dim=2)
+            patch = self.wave_patch[0]            
+            mask_step  = mask.squeeze(-1)         # (B, L)
+            mask_patch = mask_step.view(mask.size(0), -1, patch).any(-1).float()  # (B, L/patch)
         quant, diff, id = self.quantize(quant, mask_patch)
         quant = self.quantize_output(quant)
         dec = self.dec(quant)
