@@ -73,67 +73,92 @@ def train_icu_codebook(
     """Train VQ-VAE codebook on IHM+PHE datasets."""
 
     train_set = ICUTimeSeriesDataset(data_root, "train", smoke_test=smoke_test)
-    val_set = ICUTimeSeriesDataset(data_root, "val", smoke_test=smoke_test)
+    val_set   = ICUTimeSeriesDataset(data_root, "val",   smoke_test=smoke_test)
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_set, batch_size=batch_size)
+    val_loader   = DataLoader(val_set,   batch_size=batch_size)
 
     model = TStokenizer(
-        data_shape=(48, 34), hidden_dim=64, n_embed=256, block_num=4, wave_length=4
+        data_shape=(48, 34), hidden_dim=64, n_embed=256,
+        block_num=4, wave_length=4
     ).to(device)
     optim = torch.optim.Adam(model.parameters(), lr=lr)
-    
+
     if use_wandb:
-        wandb.init(project="icu-vq-codebook", config={
-            "epochs": epochs,
-            "lr": lr,
-            "batch_size": batch_size,
-            "device": device,
-            "smoke_test": smoke_test
-        })
+        wandb.init(project="icu-vq-codebook", config=dict(
+            epochs=epochs, lr=lr, batch_size=batch_size,
+            device=device, smoke_test=smoke_test))
         wandb.watch(model)
 
     for epoch in range(epochs):
+        # ───────────── train ──────────────
         model.train()
-        train_losses = []
+        loss_sum = recon_sum = vq_sum = token_sum = 0.0
+        used_ids = set()
         for seqs, mask, _ in train_loader:
-            seqs = seqs.to(device)
-            mask = mask.to(device)
-            recon, diff, _ = model(seqs, mask=mask)
+            seqs, mask = seqs.to(device), mask.to(device)
+            recon, diff, ids = model(seqs, mask=mask)
+
             recon_loss = ((recon - seqs) ** 2 * mask).sum() / mask.sum()
             loss = recon_loss + diff
-            optim.zero_grad()
-            loss.backward()
-            optim.step()
-            train_losses.append(loss.item())
-            
-        avg_train_loss = np.mean(train_losses)
-        
-        # simple val loss print
+            optim.zero_grad(); loss.backward(); optim.step()
+
+            # 统计
+            step_tokens = mask.sum().item()          # 有效时间步
+            token_sum  += step_tokens
+            loss_sum   += loss.item()   * step_tokens
+            recon_sum  += recon_loss.item() * step_tokens
+            vq_sum     += diff.item()   * step_tokens
+            used_ids.update(ids.flatten().tolist())
+
+        avg_train_loss  = loss_sum  / token_sum
+        avg_train_recon = recon_sum / token_sum
+        avg_train_vq    = vq_sum    / token_sum
+        code_usage_train = len(used_ids) / model.n_embed   # 0-1
+
+        # ───────────── valid ─────────────
         model.eval()
+        loss_sum = recon_sum = vq_sum = token_sum = 0.0
+        used_ids.clear()
         with torch.no_grad():
-            losses = []
             for seqs, mask, _ in val_loader:
-                seqs = seqs.to(device)
-                mask = mask.to(device)
-                recon, diff, _ = model(seqs, mask=mask)
+                seqs, mask = seqs.to(device), mask.to(device)
+                recon, diff, ids = model(seqs, mask=mask)
+
                 recon_loss = ((recon - seqs) ** 2 * mask).sum() / mask.sum()
-                losses.append((recon_loss + diff).item())
-        avg_val_loss = np.mean(losses)
-        print(f"Epoch {epoch+1}/{epochs}, Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
-        
+
+                step_tokens = mask.sum().item()
+                token_sum  += step_tokens
+                loss_sum   += (recon_loss + diff).item() * step_tokens
+                recon_sum  += recon_loss.item()          * step_tokens
+                vq_sum     += diff.item()                * step_tokens
+                used_ids.update(ids.flatten().tolist())
+
+        avg_val_loss  = loss_sum  / token_sum
+        avg_val_recon = recon_sum / token_sum
+        avg_val_vq    = vq_sum    / token_sum
+        code_usage_val = len(used_ids) / model.n_embed
+
+        print(f"Epoch {epoch+1}/{epochs}  "
+              f"Train {avg_train_loss:.4f}  Val {avg_val_loss:.4f}  "
+              f"CodeUsed {code_usage_train:.2%}")
+
         if use_wandb:
             wandb.log({
                 "epoch": epoch + 1,
-                "train_loss": avg_train_loss,
-                "val_loss": avg_val_loss,
-                "recon_loss": recon_loss.item(),
-                "vq_diff": diff.item()
+                "train_loss":  avg_train_loss,
+                "val_loss":    avg_val_loss,
+                "train_recon": avg_train_recon,
+                "val_recon":   avg_val_recon,
+                "train_vq":    avg_train_vq,
+                "val_vq":      avg_val_vq,
+                "code_usage_train": code_usage_train,
+                "code_usage_val":   code_usage_val,
             })
 
     torch.save(model.state_dict(), save_path)
-    
     if use_wandb:
         wandb.finish()
+
 
 
 class ICUCodebook(nn.Module):
@@ -186,7 +211,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_path", type=str, default="TStokenizer/Vq_weight/vq.ckpt")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--smoke_test", action="store_true",
                         help="开启后使用每个pkl文件的前30个样本进行快速测试")
     parser.add_argument("--use_wandb", action="store_true",
@@ -196,6 +221,6 @@ if __name__ == "__main__":
     train_icu_codebook(args.data_root, save_path=args.save_path,
                        epochs=args.epochs, lr=args.lr, device=args.device,
                        smoke_test=args.smoke_test, use_wandb=args.use_wandb)
-    
+
 # smoke test:
-# python train_icu_codebook.py --data_root 您的数据路径 --smoke_test --use_wandb
+# python train_icu_codebook.py --data_root /home/ubuntu/Virginia/output_mimic3 --use_wandb
