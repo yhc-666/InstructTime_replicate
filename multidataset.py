@@ -16,8 +16,17 @@ import torch
 from torch.utils.data import Dataset
     
 class MultiDataset(Dataset):
-    r"""
-    A Dataset Class for building Dataloader of ECG or other datasets.
+    """
+    功能: 多领域数据集类，用于创建时间序列和文本指令的混合数据集
+    属性:
+        - samples: 样本列表，每个样本为(text, time_series, _)的三元组
+        - tokenizer: MultiTokenizer实例，用于编码文本和时间序列
+        - mode: 运行模式，'train'或'test'
+        - max_length: 输入序列的最大长度
+        - multi: 时间序列数据类型标识('mix', 'geo', 'sleep', 'esr'等)
+        - prefix_tokens: 前缀token列表
+    作用: 
+        加载不同领域的时间序列数据，与文本指令结合，转换为模型可用的格式
     """
 
     def __init__(
@@ -29,6 +38,16 @@ class MultiDataset(Dataset):
         encoder_max_length=256,
         prefix_text="",
     ) -> None:
+        """
+        功能: 初始化多领域数据集
+        输入:
+            - samples: 样本列表，每个样本包含(text, time_series, _)
+            - tokenizer: MultiTokenizer实例
+            - mode: 运行模式，'train'或'test'
+            - multi: 多模态类型标识('mix', 'geo', 'sleep'等)
+            - encoder_max_length: 编码器的最大序列长度，默认256
+            - prefix_text: 输入文本的前缀，默认为空
+        """
         assert mode in ["train", "test"]
         super().__init__()
         self.samples = samples
@@ -39,9 +58,29 @@ class MultiDataset(Dataset):
         self.prefix_tokens = self.tokenizer.encode(prefix_text) if prefix_text else []
     
     def __len__(self):
+        """
+        功能: 返回数据集中的样本数量
+        返回: 整数，样本数量
+        """
         return len(self.samples)
 
     def __getitem__(self, idx):
+        """
+        功能: 获取指定索引的样本并处理为模型输入格式
+        输入:
+            - idx: 样本索引
+        输出:
+            - 字典，包含处理后的样本数据:
+              训练模式: {'input_ids', 'attn_masks', 'label_ids'}
+              测试模式: {'input_ids', 'attn_masks', 'label'}
+        处理流程:
+            1. 从样本中提取文本和时间序列数据
+            2. 从文本中分离指令和标签
+            3. 根据模式决定输入文本格式
+            4. 使用template函数组合时间序列和文本
+            5. 添加注意力掩码和标签ID
+            6. 应用padding处理
+        """
         text, ecg, _ = self.samples[idx]
 
         dx_index = text.find("information.\n")
@@ -79,8 +118,18 @@ class MultiDataset(Dataset):
             }
         
     def template(self, ecg, text):
-        r"""
-        The contents of the items are stitched together according to a template to construct the input.
+        """
+        功能: 根据模板组合时间序列和文本，构建模型输入
+        输入:
+            - ecg: 时间序列数据，不同数据类型有不同的shape
+            - text: 文本指令
+        输出:
+            - input_ids: 整数列表，表示组合后的输入token ID
+        处理流程:
+            1. 根据数据类型(multi)和时间序列形状确定正确的描述和tokenizer
+            2. 编码时间序列数据
+            3. 将时间序列token与文本token连接
+            4. 截断到最大长度
         """
         input_ids = self.prefix_tokens.copy()
         if self.multi == 'mix':
@@ -125,11 +174,17 @@ class MultiDataset(Dataset):
         return input_ids
 
     def padding(self, input_ids: list, attn_masks: list):
-        r"""
-        Padding the inputs for GPT model.
-
-        For training, we pad the right side,
-        For testing, we pad the left side.
+        """
+        功能: 对输入序列应用填充(padding)处理
+        输入:
+            - input_ids: 整数列表，输入token ID
+            - attn_masks: 整数列表，注意力掩码
+        输出:
+            - input_ids: 填充后的输入token ID列表，长度为self.max_length
+            - attn_masks: 填充后的注意力掩码列表，长度为self.max_length
+        处理流程:
+            - 训练模式：在右侧填充(便于自回归学习)
+            - 测试模式：在左侧填充(便于生成任务)
         """
         assert len(input_ids) <= self.max_length
 

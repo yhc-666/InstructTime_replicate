@@ -9,7 +9,7 @@ from torch import nn
 from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
 import wandb
-
+import json
 from TStokenizer.model import TStokenizer
 
 
@@ -61,32 +61,53 @@ class ICUTimeSeriesDataset(Dataset):
 
 def train_icu_codebook(
     data_root: str,
-    save_path: str = "vq.ckpt",
-    *,
+    save_dir: str = "./ecg_tokenizer/test_ecg_patch64",
+    *,                            
+    hidden_dim: int = 64,
+    n_embed: int = 256,
+    wave_length: int = 4,
+    block_num: int = 4,
+    max_len: int = 48,            # 数据集最大时间步
+    ts_channels: int = 34,       # 时间序列通道数
     epochs: int = 30,
     lr: float = 1e-3,
     batch_size: int = 64,
     device: str = "cuda",
     smoke_test: bool = False,
     use_wandb: bool = False
-    ):
+):
+
     """Train VQ-VAE codebook on IHM+PHE datasets."""
 
-    train_set = ICUTimeSeriesDataset(data_root, "train", smoke_test=smoke_test)
-    val_set   = ICUTimeSeriesDataset(data_root, "val",   smoke_test=smoke_test)
+    train_set = ICUTimeSeriesDataset(data_root, "train",
+                                     max_len=max_len, smoke_test=smoke_test)
+    val_set   = ICUTimeSeriesDataset(data_root, "val",
+                                     max_len=max_len, smoke_test=smoke_test)
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
     val_loader   = DataLoader(val_set,   batch_size=batch_size)
 
     model = TStokenizer(
-        data_shape=(48, 34), hidden_dim=64, n_embed=256,
-        block_num=4, wave_length=4
+        data_shape=(max_len, ts_channels),
+        hidden_dim=hidden_dim,
+        n_embed=n_embed,
+        block_num=block_num,
+        wave_length=wave_length
     ).to(device)
+
     optim = torch.optim.Adam(model.parameters(), lr=lr)
 
+    hyper = dict(
+        data_shape=(max_len, ts_channels),
+        hidden_dim=hidden_dim,
+        n_embed=n_embed,
+        block_num=block_num,
+        wave_length=wave_length
+    )
+    
     if use_wandb:
-        wandb.init(project="icu-vq-codebook", config=dict(
-            epochs=epochs, lr=lr, batch_size=batch_size,
-            device=device, smoke_test=smoke_test))
+        wandb.init(project="icu-vq-codebook", config=hyper | dict(
+        epochs=epochs, lr=lr, batch_size=batch_size,
+        device=device, smoke_test=smoke_test))
         wandb.watch(model)
 
     for epoch in range(epochs):
@@ -154,73 +175,76 @@ def train_icu_codebook(
                 "code_usage_train": code_usage_train,
                 "code_usage_val":   code_usage_val,
             })
+    
+    # --------(1) 创建保存目录--------
+    os.makedirs(save_dir, exist_ok=True)
 
-    torch.save(model.state_dict(), save_path)
+    # --------(2) 把所有超参写入 args.json--------
+    with open(os.path.join(save_dir, "args.json"), "w") as f:
+        json.dump(hyper, f, indent=2)
+
+    # --------(3) 保存纯 state-dict--------
+    torch.save(model.state_dict(), os.path.join(save_dir, "model.pkl"))
+
     if use_wandb:
         wandb.finish()
 
 
-
-class ICUCodebook(nn.Module):
-    """Utility wrapper providing ``encode`` for trained codebook."""
-
-    def __init__(self, ckpt_path: str, device: str = "cpu"):
-        super().__init__()
-        self.device = device
-        self.model = TStokenizer(data_shape=(48, 34), hidden_dim=64, n_embed=256,
-                                 block_num=4, wave_length=4)
-        self.model.load_state_dict(torch.load(ckpt_path, map_location=device))
-        self.model.to(device)
-        self.model.eval()
-
-    @torch.no_grad()
-    def encode(self, ts: np.ndarray, valid_len: int | None = None) -> np.ndarray:
-        """Convert ``(T,34)`` array into token indices.
-
-        Parameters
-        ----------
-        ts : np.ndarray
-            Time series with shape ``(T, 34)``.
-        valid_len : int, optional
-            Actual sequence length. If ``None``, use ``ts.shape[0]``.
-        """
-        arr = np.asarray(ts, dtype=np.float32)
-        valid_len = arr.shape[0] if valid_len is None else valid_len
-        arr = arr[:valid_len]
-        if arr.shape[0] < 48:
-            pad = np.zeros((48 - arr.shape[0], arr.shape[1]), dtype=np.float32)
-            arr = np.concatenate([arr, pad], axis=0)
-        tensor = torch.from_numpy(arr).unsqueeze(0).to(self.device)
-        mask = torch.zeros(1, 48, 1, device=self.device)
-        mask[0, :valid_len] = 1
-        _, _, ids = self.model(tensor, mask=mask)
-        patch_len = self.model.wave_patch[0]
-        max_tokens = ids.shape[1]
-        valid_tokens = (valid_len + patch_len - 1) // patch_len
-        return ids[:, :valid_tokens].squeeze(0).cpu().numpy()
-
-
-__all__ = ["ICUTimeSeriesDataset", "train_icu_codebook", "ICUCodebook"]
-
 if __name__ == "__main__":
-    import argparse
+    import argparse, pathlib, json
 
     parser = argparse.ArgumentParser(description="Train ICU VQ codebook")
-    parser.add_argument("--data_root", type=str, default="/Users/haochengyang/Desktop/research/CTPD/MMMSPG-014C/EHR_dataset/mimiciii_benchmark/output_mimic3",
-                        help="Path containing ihm/ and pheno/ folders")
-    parser.add_argument("--save_path", type=str, default="TStokenizer/Vq_weight/vq.ckpt")
-    parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--smoke_test", action="store_true",
-                        help="开启后使用每个pkl文件的前30个样本进行快速测试")
-    parser.add_argument("--use_wandb", action="store_true",
-                        help="启用wandb记录训练进度")
+    # 核心路径
+    parser.add_argument("--data_root", type=str, required=True,
+                        help="Folder with ihm/ and pheno/ pkl splits")
+    parser.add_argument("--save_dir",  type=str,
+                        default="TStokenizer/Vq_weight",
+                        help="Directory to dump args.json & model.pkl")
+    # 训练超参（可选）
+    parser.add_argument("--hidden_dim",    type=int, default=64)
+    parser.add_argument("--n_embed",    type=int, default=256)
+    parser.add_argument("--wave_length",type=int, default=4)
+    parser.add_argument("--block_num",  type=int, default=4)
+    parser.add_argument("--max_len",    type=int, default=48)
+    parser.add_argument("--ts_channels",type=int, default=34)
+    parser.add_argument("--epochs",     type=int, default=30)
+    parser.add_argument("--lr",         type=float, default=1e-3)
+    parser.add_argument("--batch_size", type=int, default=64)
+
+    # 运行环境
+    parser.add_argument("--device",     type=str, default="cpu")
+    parser.add_argument("--smoke_test", action="store_true")
+    parser.add_argument("--use_wandb",  action="store_true")
+
     args = parser.parse_args()
 
-    train_icu_codebook(args.data_root, save_path=args.save_path,
-                       epochs=args.epochs, lr=args.lr, device=args.device,
-                       smoke_test=args.smoke_test, use_wandb=args.use_wandb)
+    train_icu_codebook(
+        data_root   = args.data_root,
+        save_dir    = args.save_dir,
+        hidden_dim     = args.hidden_dim,
+        n_embed     = args.n_embed,
+        wave_length = args.wave_length,
+        block_num   = args.block_num,
+        max_len     = args.max_len,
+        ts_channels = args.ts_channels,
+        epochs      = args.epochs,
+        lr          = args.lr,
+        batch_size  = args.batch_size,
+        device      = args.device,
+        smoke_test  = args.smoke_test,
+        use_wandb   = args.use_wandb,
+    )
 
-# smoke test:
-# python train_icu_codebook.py --data_root /home/ubuntu/Virginia/output_mimic3 --use_wandb
+
+# /Users/haochengyang/Desktop/research/CTPD/MMMSPG-014C/EHR_dataset/mimiciii_benchmark/output_mimic3
+# /home/ubuntu/Virginia/output_mimic3
+
+# python train_icu_codebook.py \
+#     --data_root   /Users/haochengyang/Desktop/research/CTPD/MMMSPG-014C/EHR_dataset/mimiciii_benchmark/output_mimic3 \
+#     --smoke_test \
+#     --epochs      1 \
+#     --use_wandb
+
+
+
+

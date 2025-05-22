@@ -1,17 +1,19 @@
 """
-作用: InstructTime模型训练和推理的主入口脚本，实现了训练、验证和测试流程
+作用: 
+    - InstructTime模型训练和推理的主入口脚本, 实现了训练、验证和测试流程
+    - 能同时进行两种训练模式 1.训练Universal模型(Auto-Regressive) 2.训练Adapt模型(Supervised Fine-Tuning)
 输入: 
     - 预处理后的数据
     - 预训练的GPT2模型
-    - 训练好的TStokenizer模型
+    - 已训练好的 VQVAE tokenizer
 输出: 
     - 训练好的InstructTime模型
     - 评估结果和预测
 示例CLI:
-    # 训练Universal模型
+    # 训练Universal模型(Auto-Regressive)
     python run_truth_loss.py --device "cuda:0" --dataset "mix" --batch_size 16 --lr 1e-5 --epochs 15 --adapt False
     
-    # 训练Adapt模型
+    # 训练Adapt模型(SFT)
     python run_truth_loss.py --device "cuda:0" --dataset "ecg" --batch_size 16 --lr 1e-5 --epochs 10 --adapt True --load_model_path "./gptmodel"
 """
 
@@ -46,6 +48,11 @@ vqvae_path4 = "./ecg_tokenizer/test_har_64_256_1"
 vqvae_path5 = "./ecg_tokenizer/test_rwc_64_384_32"
 
 def seed_everything(seed):
+    """
+    功能: 设置所有随机种子，确保实验可重复性
+    输入:
+        - seed: 整数随机种子
+    """
     random.seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
     np.random.seed(seed)
@@ -57,6 +64,16 @@ def seed_everything(seed):
     torch.backends.cudnn.enabled = True
 
 def collate_fn_train(batch):
+    """
+    功能: 训练数据批处理函数，收集批次中的样本并组织为模型输入格式
+    输入:
+        - batch: 批次数据列表，每个元素为字典，包含input_ids, attn_masks, label_ids
+    输出:
+        - 组织好的批次字典，包含:
+            - input_ids: 输入ID张量, shape=[batch_size, seq_len]
+            - attention_mask: 注意力掩码张量, shape=[batch_size, seq_len]
+            - label_ids: 标签ID张量, shape=[batch_size, seq_len]
+    """
     input_ids = [x["input_ids"] for x in batch]
     attention_mask = [x["attn_masks"] for x in batch]
     label_ids = [x["label_ids"] for x in batch]
@@ -66,7 +83,17 @@ def collate_fn_train(batch):
         "label_ids": torch.stack(label_ids),
     }
 
-def collate_fn_test(batch):
+def collate_fn_validation(batch):
+    """
+    功能: 验证数据批处理函数，收集批次中的样本并组织为模型输入格式
+    输入:
+        - batch: 批次数据列表，每个元素为字典，包含input_ids, attn_masks, label
+    输出:
+        - 组织好的批次字典，包含:
+            - input_ids: 输入ID张量, shape=[batch_size, seq_len]
+            - attention_mask: 注意力掩码张量, shape=[batch_size, seq_len]
+            - labels: 原始标签文本列表, 每个元素为字符串
+    """
     input_ids = [x["input_ids"] for x in batch]
     attention_mask = [x["attn_masks"] for x in batch]
     labels = [x["label"] for x in batch]
@@ -76,7 +103,64 @@ def collate_fn_test(batch):
         "labels": labels,
     }
 
+def collate_fn_test(batch):
+    """
+    功能: 测试数据批处理函数，收集批次中的样本并组织为模型输入格式
+    输入:
+        - batch: 批次数据列表，每个元素为字典，包含input_ids, attn_masks, label
+    输出:
+        - 组织好的批次字典，包含:
+            - input_ids: 输入ID张量, shape=[batch_size, seq_len]
+            - attention_mask: 注意力掩码张量, shape=[batch_size, seq_len]
+            - labels: 原始标签文本列表, 每个元素为字符串
+    """
+    input_ids = [x["input_ids"] for x in batch]
+    attention_mask = [x["attn_masks"] for x in batch]
+    labels = [x["label"] for x in batch]
+    return {
+        "input_ids": torch.stack(input_ids),
+        "attention_mask": torch.stack(attention_mask),
+        "labels": labels,
+    }
+
+
+
+def validate_sft(model, ValidDataLoader, args, logger, out=False):
+    """
+    功能: 验证SFT模型在验证集上的性能
+    输入:
+        - model: InstructTime模型实例
+    """
+    pass
+
+
+def validate_ar(model, ValidDataLoader, args, logger, out=False):
+    """
+    功能: 验证AR模型在验证集上的性能
+    输入:
+        - model: InstructTime模型实例
+    """
+    pass
+
+
 def test(model, TestDataLoader, args, logger, out=False):
+    """
+    功能: 评估模型在测试集上的性能
+    输入:
+        - model: InstructTime模型实例
+        - TestDataLoader: 测试数据加载器
+        - args: 运行参数
+        - logger: 日志记录器
+        - out: 布尔值，是否返回原始预测结果和标签
+    输出:
+        - 如果out=False: 返回模型在所有数据集上的综合评估分数(浮点数)
+        - 如果out=True: 返回原始预测结果和标签列表(用于详细分析)
+    过程:
+        1. 将模型设置为评估模式
+        2. 不计算梯度，进行前向推理
+        3. 解码模型输出，提取各种数据类型的预测结果
+        4. 计算各数据类型的评估指标并返回
+    """
     model.eval()
 
     with torch.no_grad():
@@ -160,7 +244,11 @@ def test(model, TestDataLoader, args, logger, out=False):
 
 def setup_logging(run_path):
     """
-    logger
+    功能: 设置日志记录器
+    输入:
+        - run_path: 日志文件保存路径
+    输出:
+        - 配置好的logger对象，用于记录训练过程中的信息
     """
     log_file = os.path.join(run_path, "log.log")
 
@@ -178,26 +266,79 @@ def setup_logging(run_path):
     return logger
 
 def initialize_model(args, tokenizer, TStokenizers):
+    """
+    功能: 初始化InstructTime模型
+    输入:
+        - args: 运行参数
+        - tokenizer: MultiTokenizer实例, 用于处理文本和时间序列数据
+        - TStokenizers: 时间序列tokenizer列表
+    输出:
+        - model: 初始化好的InstructTime模型实例
+        - sub_path: 模型保存子路径
+    过程:
+        1. 加载GPT2配置
+        2. 初始化InstructTime模型
+        3. 加载预训练的GPT2权重
+        4. 调整token嵌入层大小
+        5. 创建新的输出嵌入层
+    """
     config = GPT2Config.from_pretrained(local_model_path)
     model = InstructTime(config, TStokenizers, text_embedding=len(tokenizer.textTokenizer)).to(args.device)
 
     pretrained_gpt2_model = GPT2LMHeadModel.from_pretrained(local_model_path)
     model.load_state_dict(pretrained_gpt2_model.state_dict(), strict=False)
 
+    # ① 由于新增 <BET>, <EET> 两个文本 token，先把 wte (50259→50261)
+    #    也就是 nn.Embedding(vocab_txt, hidden) 扩容。
+    #    新行随机 ~ N(0, config.initializer_range²)；lm_head 会一起扩且仍与 wte 绑权重。
     model.resize_token_embeddings(len(tokenizer.textTokenizer))
-    current_output = model.get_output_embeddings()
-    new_output = nn.Linear(config.n_embd, tokenizer.vocabSize_all(), bias=False).to(args.device)
+
+    # ② 保留“扩好后仍 tied 的 lm_head”权重视图，稍后拷贝到自定义更大 lm_head。
+    current_output = model.get_output_embeddings()   # shape (50261, hidden)
+
+    # ③ 新建一个更大的的 lm_head：行 = 文本 50261 + ΣK_i(codebooks)，列 = hidden
+    new_output = nn.Linear(config.n_embd,
+                        tokenizer.vocabSize_all(),   # 50261 + ΣK_i
+                        bias=False).to(args.device)
+
+    # ④ 继承文本部分权重；codebook 行保持随机初始化
     new_output.weight.data[:len(tokenizer.textTokenizer)] = current_output.weight.data
+
+    # ⑤ 替换输出投影，解除 wte 与 lm_head 的 weight-tying
     model.set_output_embeddings(new_output)
+    #    - 输入端 wte 只覆盖 0-50260 的文本 ID
+    #    - 输出端可预测文本 ID + 各 codebook token
+    #    - codebook token 的输入嵌入由 TSEmbedding 负责
     
     sub_path = "no_frozen"
     
     return model, sub_path
 
-def train_model(model, args, TrainDataLoader, TestDataLoader, optimizer, scheduler, scaler, logger, run_path):
+def train_model(model, args, TrainDataLoader, ValidDataLoader, optimizer, scheduler, scaler, logger, run_path):
+    """
+    功能: 训练InstructTime模型
+    输入:
+        - model: InstructTime模型实例
+        - args: 运行参数
+        - TrainDataLoader: 训练数据加载器
+        - ValidDataLoader: 验证数据加载器
+        - optimizer: 优化器
+        - scheduler: 学习率调度器
+        - scaler: 梯度缩放器(用于混合精度训练)
+        - logger: 日志记录器
+        - run_path: 结果保存路径
+    输出:
+        - 无直接返回值, 但会将最佳模型保存到run_path/best_model路径
+    过程:
+        1. 训练每个epoch:
+            a. 在训练集上更新模型参数
+            b. 记录训练损失
+        2. 在验证集上评估模型
+        3. 保存性能最佳的模型
+    """
     best = 0.0
         
-    for epoch in range(args.epochs):
+    for epoch in range(args.epochs): 
         step, train_losses = 0, 0.0
         tqdm_iter = tqdm(TrainDataLoader, desc=f"GPT Epoch {epoch+1}", ncols=120)
         
@@ -228,13 +369,21 @@ def train_model(model, args, TrainDataLoader, TestDataLoader, optimizer, schedul
 
         final_loss = format(train_losses / step, ".4f")
         logger.info(f"Epoch {epoch+1}\nLoss: {final_loss}")
-        
-        res = test(model, TestDataLoader, args, logger, out=False)
-        print(res)
-        if res > best:
-            MODEL_STORED_PATH = run_path + "/best_model"
-            best = res
-            model.save_pretrained(MODEL_STORED_PATH)
+
+        if args.adapt: # SFT
+            res = validate_sft(model, ValidDataLoader, args, logger, out=False)
+            print(res)
+            if res > best:
+                MODEL_STORED_PATH = run_path + "/best_model"
+                best = res
+                model.save_pretrained(MODEL_STORED_PATH)
+        else: # AR
+            res = validate_ar(model, ValidDataLoader, args, logger, out=False)
+            print(res)
+            if res > best:
+                best = res
+                MODEL_STORED_PATH = run_path + "/best_model"
+                model.save_pretrained(MODEL_STORED_PATH)
 
 if __name__ == "__main__":
     args = get_hyperparams()

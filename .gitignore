@@ -2,3 +2,7 @@ TStokenizer/__pycache__
 
 TStokenizer/Vq_weight
 
+ts_tokenized_datasets
+
+wandb
+

@@ -457,6 +457,7 @@ class TStokenizer(nn.Module):
         功能: VQVAE模型前向传播
         输入:
             - input: 时间序列数据，形状为 [batch_size, seq_len, feat_dim]
+            - mask: 掩码, 形状为 [batch_size, seq_len]
         输出:
             - dec: 重构的时间序列，形状与输入相同
             - diff: 量化损失, 只包含codebook-loss + β·commitment-loss, 不包含重构损失
