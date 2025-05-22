@@ -87,20 +87,21 @@ def collate_fn_validation(batch):
     """
     功能: 验证数据批处理函数，收集批次中的样本并组织为模型输入格式
     输入:
-        - batch: 批次数据列表，每个元素为字典，包含input_ids, attn_masks, label
+        - batch: 批次数据列表，每个元素为字典，包含input_ids, attn_masks, label_ids
     输出:
         - 组织好的批次字典，包含:
             - input_ids: 输入ID张量, shape=[batch_size, seq_len]
             - attention_mask: 注意力掩码张量, shape=[batch_size, seq_len]
-            - labels: 原始标签文本列表, 每个元素为字符串
+            - label_ids: 标签ID张量, shape=[batch_size, seq_len]
     """
     input_ids = [x["input_ids"] for x in batch]
     attention_mask = [x["attn_masks"] for x in batch]
-    labels = [x["label"] for x in batch]
+    label_ids = [x["label_ids"] for x in batch]
+
     return {
         "input_ids": torch.stack(input_ids),
         "attention_mask": torch.stack(attention_mask),
-        "labels": labels,
+        "label_ids": torch.stack(label_ids),
     }
 
 def collate_fn_test(batch):
@@ -335,6 +336,8 @@ def initialize_model(args, tokenizer, TStokenizers):
     #    - 输入端 wte 只覆盖 0-50260 的文本 ID
     #    - 输出端可预测文本 ID + 各 codebook token
     #    - codebook token 的输入嵌入由 TSEmbedding 负责
+
+    model.config.vocab_size = tokenizer.vocabSize_all() 
     
     sub_path = "no_frozen"
     
@@ -477,7 +480,7 @@ if __name__ == "__main__":
                                 loss_type="ar")
     TestDataset = MultiDataset(test_files, tokenizer, mode="test",
                                encoder_max_length=args.encoder_max_length)
-
+    
     # smoke test 时仅取前30条样本
     if args.smoke_test:
         TrainDataset.samples = TrainDataset.samples[:30]
@@ -562,7 +565,7 @@ if __name__ == "__main__":
         wandb.finish()
 
 # # Universal模型(AR)的smoke test
-# python run_truth_loss.py --device "cuda:0" --dataset "mix" --batch_size 4 --lr 1e-5 --epochs 1 --adapt False --smoke_test 
+# python run_truth_loss.py --device "cuda:0" --dataset "mix" --batch_size 4 --lr 1e-5 --epochs 1 --smoke_test 
 
 # # Adapt模型(SFT)的smoke test
-# python run_truth_loss.py --device "cuda:0" --dataset "ecg" --batch_size 4 --lr 1e-5 --epochs 1 --adapt True --load_model_path "./gptmodel" --smoke_test
+# python run_truth_loss.py --device "cuda:0" --dataset "ecg" --batch_size 4 --lr 1e-5 --epochs 1  --load_model_path "./gptmodel" --smoke_test
