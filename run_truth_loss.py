@@ -443,7 +443,6 @@ if __name__ == "__main__":
     if args.wandb:
         wandb.init(
             project  = "Instructime Replicate",
-            name     = f"{args.model}_lr{args.lr}",  # run name
             group    = "LLM_AR",           # 同一实验组
             config   = vars(args),                  # 超参入库
         )
