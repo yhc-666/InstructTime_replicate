@@ -33,6 +33,7 @@ from transformers import (
     GPT2LMHeadModel,
     GPT2Config,
 )
+import wandb
 
 from multimodel import InstructTime, MultiTokenizer
 from multidataset import MultiDataset
@@ -41,11 +42,10 @@ from metrics import metric_ecg, metric_eeg, metric_har, metric_fd, metric_rwc
 from utils import extract_all_information, load_TStokenizer
 
 local_model_path = "./gpt2-model"
-vqvae_path1 = "./ecg_tokenizer/test_ecg_64_128_40"
-vqvae_path2 = "./ecg_tokenizer/test_eeg_64_256_25"
-vqvae_path3 = "./ecg_tokenizer/test_fd_64_512_40"
-vqvae_path4 = "./ecg_tokenizer/test_har_64_256_1"
-vqvae_path5 = "./ecg_tokenizer/test_rwc_64_384_32"
+# 统一的 ICU VQ-VAE tokenizer 路径
+vqvae_path = "TStokenizer/Vq_weight"
+# tokenized dataset 根目录
+DATA_ROOT = "ts_tokenized_datasets"
 
 def seed_everything(seed):
     """
@@ -140,7 +140,33 @@ def validate_ar(model, ValidDataLoader, args, logger, out=False):
     输入:
         - model: InstructTime模型实例
     """
-    pass
+    model.eval()
+    loss_sum = 0.0
+    step = 0
+    with torch.no_grad():
+        for data in tqdm(ValidDataLoader, desc="Val", ncols=120):
+            input_ids = data["input_ids"].to(args.device)
+            attention_mask = data["attention_mask"].to(args.device)
+            label_ids = data["label_ids"].to(args.device)
+
+            with autocast():
+                outputs = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=label_ids,
+                )
+
+            loss_sum += outputs.loss.item()
+            step += 1
+
+    avg_loss = loss_sum / step
+    ppl = float(np.exp(avg_loss))
+    logger.info(f"Validation Loss: {avg_loss:.4f} | PPL: {ppl:.2f}")
+
+    if out:
+        return avg_loss, ppl
+    else:
+        return avg_loss, ppl
 
 
 def test(model, TestDataLoader, args, logger, out=False):
@@ -336,7 +362,10 @@ def train_model(model, args, TrainDataLoader, ValidDataLoader, optimizer, schedu
         2. 在验证集上评估模型
         3. 保存性能最佳的模型
     """
+    best_ppl = float("inf")
     best = 0.0
+    patience = 3
+    patience_cnt = 0
         
     for epoch in range(args.epochs): 
         step, train_losses = 0, 0.0
@@ -367,8 +396,8 @@ def train_model(model, args, TrainDataLoader, ValidDataLoader, optimizer, schedu
             step += 1
             tqdm_iter.set_postfix({"loss": format(train_losses / step, ".4f")})
 
-        final_loss = format(train_losses / step, ".4f")
-        logger.info(f"Epoch {epoch+1}\nLoss: {final_loss}")
+        train_loss = train_losses / step
+        logger.info(f"Epoch {epoch+1}\nLoss: {train_loss:.4f}")
 
         if args.adapt: # SFT
             res = validate_sft(model, ValidDataLoader, args, logger, out=False)
@@ -378,148 +407,96 @@ def train_model(model, args, TrainDataLoader, ValidDataLoader, optimizer, schedu
                 best = res
                 model.save_pretrained(MODEL_STORED_PATH)
         else: # AR
-            res = validate_ar(model, ValidDataLoader, args, logger, out=False)
-            print(res)
-            if res > best:
-                best = res
+            val_loss, val_ppl = validate_ar(model, ValidDataLoader, args, logger)
+
+            print(f"Epoch {epoch+1:02d} | "
+                  f"TrainLoss {train_loss:.4f} | "
+                  f"ValLoss {val_loss:.4f} | "
+                  f"ValPPL {val_ppl:.2f}")
+
+            if args.wandb:
+                wandb.log({
+                    "epoch": epoch + 1,
+                    "train_loss": train_loss,
+                    "val_loss": val_loss,
+                    "val_ppl": val_ppl,
+                })
+
+            if val_ppl < best_ppl:
+                best_ppl = val_ppl
+                patience_cnt = 0
                 MODEL_STORED_PATH = run_path + "/best_model"
                 model.save_pretrained(MODEL_STORED_PATH)
+            else:
+                patience_cnt += 1
+                if patience_cnt >= patience:
+                    logger.info("Early stopping triggered")
+                    break
 
 if __name__ == "__main__":
     args = get_hyperparams()
     seed_everything(args.seed)
 
-    if args.dataset == 'mix' or args.dataset == 'geo':
-        file_path = 'ecg_no_big'
-        train_path = os.path.join(file_path, 'samples_train.pkl')
-        test_path = os.path.join(file_path, 'samples_test.pkl')
-        if os.path.isfile(train_path) and os.path.isfile(test_path):
-            with open(train_path, 'rb') as file:
-                samples_train = pickle.load(file)
-            with open(test_path, 'rb') as file:
-                samples_test = pickle.load(file)
-        text1, ecg, _ = samples_train[0]
-        print(len(samples_train) + len(samples_test), len(samples_train), len(samples_test))
-        print(text1)
+    if args.wandb:
+        wandb.init(project="instructtime", config=vars(args))
 
-    if args.dataset == 'mix' or args.dataset == 'eeg':
-        file_path = 'eeg_no_big'
-        train_path = os.path.join(file_path, 'samples_train.pkl')
-        test_path = os.path.join(file_path, 'samples_test.pkl')
-        if os.path.isfile(train_path) and os.path.isfile(test_path):
-            with open(train_path, 'rb') as file:
-                samples_train_eeg = pickle.load(file)
-            with open(test_path, 'rb') as file:
-                samples_test_eeg = pickle.load(file)
-        text2, eeg, _ = samples_train_eeg[0]
-        print(len(samples_train_eeg) + len(samples_test_eeg), len(samples_train_eeg), len(samples_test_eeg))
-        print(text2)
-
-    if args.dataset == 'mix' or args.dataset == 'fd':
-        file_path = 'device_no_big'
-        train_path = os.path.join(file_path, 'samples_train.pkl')
-        test_path = os.path.join(file_path, 'samples_test.pkl')
-        if os.path.isfile(train_path) and os.path.isfile(test_path):
-            with open(train_path, 'rb') as file:
-                samples_train_fd = pickle.load(file)
-            with open(test_path, 'rb') as file:
-                samples_test_fd = pickle.load(file)
-        text3, fd, _ = samples_train_fd[0]
-        print(len(samples_train_fd) + len(samples_test_fd), len(samples_train_fd), len(samples_test_fd))
-        print(text3)
-
-    if args.dataset == 'mix' or args.dataset == 'har':
-        file_path = 'har_no_big'
-        train_path = os.path.join(file_path, 'samples_train.pkl')
-        test_path = os.path.join(file_path, 'samples_test.pkl')
-        if os.path.isfile(train_path) and os.path.isfile(test_path):
-            with open(train_path, 'rb') as file:
-                samples_train_har = pickle.load(file)
-            with open(test_path, 'rb') as file:
-                samples_test_har = pickle.load(file)
-        text4, har, _ = samples_train_har[0]
-        print(len(samples_train_har) + len(samples_test_har), len(samples_train_har), len(samples_test_har))
-        print(text4)
-        
-    if args.dataset == 'mix' or args.dataset == 'rwc':
-        file_path = 'rwc_no_big'
-        train_path = os.path.join(file_path, 'samples_train.pkl')
-        test_path = os.path.join(file_path, 'samples_test.pkl')
-        if os.path.isfile(train_path) and os.path.isfile(test_path):
-            with open(train_path, 'rb') as file:
-                samples_train_rwc = pickle.load(file)
-            with open(test_path, 'rb') as file:
-                samples_test_rwc = pickle.load(file)
-        text7, rwc, _ = samples_train_rwc[0]
-        print(len(samples_train_rwc) + len(samples_test_rwc), len(samples_train_rwc), len(samples_test_rwc))
-        print(text7)
-        
-    print('preprocess done')
-
-    if args.dataset == 'mix':
-        samples_train_combined = samples_train + samples_train_eeg + samples_train_har + samples_train_fd + samples_train_rwc
-        samples_test_combined = samples_test + samples_test_eeg + samples_test_har + samples_test_fd + samples_test_rwc
-        np.random.shuffle(samples_train_combined)
-        np.random.shuffle(samples_test_combined)
-        PREFIX_TEXT = "You will be receiving signals from five domains: electrocardiogram, electroencephalogram, industrial equipment, sound and physical activities.\n"
-    elif args.dataset == 'geo':
-        samples_train_combined = samples_train
-        samples_test_combined = samples_test
-        PREFIX_TEXT = "You will be receiving electrocardiogram(ECG) related signals.\n"
-    elif args.dataset == 'eeg':
-        samples_train_combined = samples_train_eeg
-        samples_test_combined = samples_test_eeg
-        PREFIX_TEXT = "You will be receiving electroencephalogram(EEG) related signals.\n"
-    elif args.dataset == 'fd':
-        samples_train_combined = samples_train_fd
-        samples_test_combined = samples_test_fd
-        PREFIX_TEXT = "You will be receiving industrial equipment related signals.\n"
-    elif args.dataset == 'rwc':
-        samples_train_combined = samples_train_rwc
-        samples_test_combined = samples_test_rwc
-        PREFIX_TEXT = "You will be receiving sound related signals.\n"
+    # 构建训练、验证和测试数据集路径
+    if args.dataset == "mix":
+        train_files = [
+            os.path.join(DATA_ROOT, "ihm", "tokenized_v1_patch64", "train.pkl"),
+            os.path.join(DATA_ROOT, "pheno", "tokenized_v1_patch64", "train.pkl"),
+        ]
+        val_files = [
+            os.path.join(DATA_ROOT, "ihm", "tokenized_v1_patch64", "val.pkl"),
+            os.path.join(DATA_ROOT, "pheno", "tokenized_v1_patch64", "val.pkl"),
+        ]
+        test_files = [
+            os.path.join(DATA_ROOT, "ihm", "tokenized_v1_patch64", "test.pkl"),
+            os.path.join(DATA_ROOT, "pheno", "tokenized_v1_patch64", "test.pkl"),
+        ]
     else:
-        samples_train_combined = samples_train_har
-        samples_test_combined = samples_test_har
-        PREFIX_TEXT = "You will be receiving human physical activities related signals.\n"
+        train_files = os.path.join(DATA_ROOT, args.dataset, "tokenized_v1_patch64", "train.pkl")
+        val_files = os.path.join(DATA_ROOT, args.dataset, "tokenized_v1_patch64", "val.pkl")
+        test_files = os.path.join(DATA_ROOT, args.dataset, "tokenized_v1_patch64", "test.pkl")
 
-    TStokenizer1 = load_TStokenizer(vqvae_path1, ecg.shape, 'cpu')
-    TStokenizer2 = load_TStokenizer(vqvae_path2, eeg.shape, 'cpu')
-    TStokenizer3 = load_TStokenizer(vqvae_path3, fd.shape, 'cpu')
-    TStokenizer4 = load_TStokenizer(vqvae_path4, har.shape, 'cpu')
-    TStokenizer5 = load_TStokenizer(vqvae_path5, rwc.shape, 'cpu')
-    TStokenizers = [TStokenizer1, TStokenizer2, TStokenizer3, TStokenizer4, TStokenizer5]
-    tokenizer = MultiTokenizer(TStokenizers)
+    # 加载时间序列tokenizer
+    ts_tokenizer = load_TStokenizer(vqvae_path, data_shape=(48, 34), device="cpu")
+    tokenizer = MultiTokenizer([ts_tokenizer])
 
-    TrainDataset = MultiDataset(
-        samples_train_combined,
-        tokenizer,
-        mode="train",
-        encoder_max_length=args.encoder_max_length,
-        multi=args.dataset,
-        prefix_text=PREFIX_TEXT,
-    )
+    # 构建数据集
+    TrainDataset = MultiDataset(train_files, tokenizer, mode="train",
+                                encoder_max_length=args.encoder_max_length,
+                                loss_type="ar")
+    ValidDataset = MultiDataset(val_files, tokenizer, mode="train",
+                                encoder_max_length=args.encoder_max_length,
+                                loss_type="ar")
+    TestDataset = MultiDataset(test_files, tokenizer, mode="test",
+                               encoder_max_length=args.encoder_max_length)
+
+    # smoke test 时仅取前30条样本
+    if args.smoke_test:
+        TrainDataset.samples = TrainDataset.samples[:30]
+        ValidDataset.samples = ValidDataset.samples[:30]
+        TestDataset.samples = TestDataset.samples[:30]
+
+    # 数据加载器
     TrainDataLoader = DataLoader(
         TrainDataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=4,
-        collate_fn=collate_fn_train,
     )
-    TestDataset = MultiDataset(
-        samples_test_combined,
-        tokenizer,
-        mode="test",
-        encoder_max_length=args.encoder_max_length,
-        multi=args.dataset,
-        prefix_text=PREFIX_TEXT,
+    ValidDataLoader = DataLoader(
+        ValidDataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=4,
     )
     TestDataLoader = DataLoader(
         TestDataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=4,
-        collate_fn=collate_fn_test,
     )
 
     num = 1
@@ -549,39 +526,29 @@ if __name__ == "__main__":
         scaler = GradScaler()
 
         logger.info(f"Begin training for run {run}")
-        train_model(model, args, TrainDataLoader, TestDataLoader, optimizer, scheduler, scaler, logger, run_path)
+        train_model(model, args, TrainDataLoader, ValidDataLoader,
+                    optimizer, scheduler, scaler, logger, run_path)
 
-        model, _ = initialize_model(args, tokenizer)
-        best_model_path = os.path.join(run_path, 'best_model')
-        model_state_dict = torch.load(os.path.join(best_model_path, 'pytorch_model.bin'), map_location=args.device)
-        model.load_state_dict(model_state_dict)
+        if args.adapt:
+            model, _ = initialize_model(args, tokenizer)
+            best_model_path = os.path.join(run_path, 'best_model')
+            model_state_dict = torch.load(
+                os.path.join(best_model_path, 'pytorch_model.bin'),
+                map_location=args.device)
+            model.load_state_dict(model_state_dict)
 
-        logger.info(f"Test best model for run {run}")
-        print_preds, print_labels = test(model, TestDataLoader, args, logger, out=True)
+            logger.info(f"Test best model for run {run}")
+            print_preds, print_labels = test(model, TestDataLoader, args, logger, out=True)
 
-        save_path = os.path.join(run_path, 'output.txt')
-        with open(save_path, 'w', encoding='utf-8') as file:
-            if args.dataset == 'mix' or args.dataset == 'geo':
-                file.write("Input Sequence: \n{}\n".format(PREFIX_TEXT + text1))
-                file.write('\n')
-            if args.dataset == 'mix' or args.dataset == 'eeg':
-                file.write("Input Sequence: \n{}\n".format(PREFIX_TEXT + text2))
-                file.write('\n')
-            if args.dataset == 'mix' or args.dataset == 'fd':
-                file.write("Input Sequence: \n{}\n".format(PREFIX_TEXT + text3))
-                file.write('\n')
-            if args.dataset == 'mix' or args.dataset == 'har':
-                file.write("Input Sequence: \n{}\n".format(PREFIX_TEXT + text4))
-                file.write('\n')
-            if args.dataset == 'mix' or args.dataset == 'rwc':
-                file.write("Input Sequence: \n{}\n".format(PREFIX_TEXT + text7))
-                file.write('\n')
-
-            for i in range(500):
-                j = i * args.num_return_sequences
-                for k in range(args.num_return_sequences):
-                    file.write("Generated Text: {}\n".format(print_preds[j + k]))
-                file.write("Actual Label: {}\n".format(print_labels[i]))
-                file.write('\n')
+            save_path = os.path.join(run_path, 'output.txt')
+            with open(save_path, 'w', encoding='utf-8') as file:
+                for i in range(len(print_labels)):
+                    j = i * args.num_return_sequences
+                    for k in range(args.num_return_sequences):
+                        file.write(f"Generated Text: {print_preds[j + k]}\n")
+                    file.write(f"Actual Label: {print_labels[i]}\n\n")
 
         logger.handlers.clear()
+
+    if args.wandb:
+        wandb.finish()
