@@ -7,7 +7,9 @@ def get_hyperparams():
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--model_path", type=str, default="./gptmodel", help="the path to save model.")
     parser.add_argument("--load_model_path", type=str, default="./gptmodel", help="the path to load pretrained model.")
-    parser.add_argument('--dataset', type=str, default='mix', choices=['har', 'geo', 'sleep', 'mix', 'esr', 'ad', 'dev', 'whale'])
+    parser.add_argument('--dataset', type=str, default='mix',
+                        choices=['mix', 'ihm', 'pheno'],
+                        help="Dataset to use: mix (IHM+Pheno), ihm or pheno")
 
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--per_max_token", type=int, default=32, help="The maximum number of tokens for a label.")
@@ -19,6 +21,11 @@ def get_hyperparams():
 
     parser.add_argument("--num_beams", type=int, default=1, help="Number of generation beams.")
     parser.add_argument("--num_return_sequences", type=int, default=1)
+    parser.add_argument("--smoke_test", action="store_true",
+                        help="Use a small portion of data for quick testing")
+    parser.add_argument("--wandb", action="store_true",
+                        help="Log training metrics to Weights & Biases")
 
     args = parser.parse_args()
     return args
+
