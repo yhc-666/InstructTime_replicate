@@ -14,7 +14,7 @@
     python run_truth_loss.py --device "cuda:0" --dataset "mix" --batch_size 16 --lr 1e-5 --epochs 15 --adapt False
     
     # 训练Adapt模型(SFT)
-    python run_truth_loss.py --device "cuda:0" --dataset "ecg" --batch_size 16 --lr 1e-5 --epochs 10 --adapt True --load_model_path "./gptmodel"
+    python run_truth_loss.py --device "cuda:0" --dataset "ihm" --batch_size 16 --lr 1e-5 --epochs 10 --adapt True --load_model_path "./gptmodel"
 """
 
 import os
@@ -38,7 +38,7 @@ import wandb
 from multimodel import InstructTime, MultiTokenizer
 from multidataset import MultiDataset
 from args import get_hyperparams
-from metrics import metric_ecg, metric_eeg, metric_har, metric_fd, metric_rwc
+#from metrics import metric_ecg, metric_eeg, metric_har, metric_fd, metric_rwc
 from utils import extract_all_information, load_TStokenizer
 
 local_model_path = "./gpt2-model"
@@ -308,10 +308,10 @@ def initialize_model(args, tokenizer, TStokenizers):
         4. 调整token嵌入层大小
         5. 创建新的输出嵌入层
     """
-    config = GPT2Config.from_pretrained(local_model_path)
+    config = GPT2Config.from_pretrained("gpt2")
     model = InstructTime(config, TStokenizers, text_embedding=len(tokenizer.textTokenizer)).to(args.device)
 
-    pretrained_gpt2_model = GPT2LMHeadModel.from_pretrained(local_model_path)
+    pretrained_gpt2_model = GPT2LMHeadModel.from_pretrained("gpt2")
     model.load_state_dict(pretrained_gpt2_model.state_dict(), strict=False)
 
     # ① 由于新增 <BET>, <EET> 两个文本 token，先把 wte (50259→50261)
@@ -490,18 +490,21 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=4,
+        collate_fn=collate_fn_train
     )
     ValidDataLoader = DataLoader(
         ValidDataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=4,
+        collate_fn=collate_fn_validation
     )
     TestDataLoader = DataLoader(
         TestDataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=4,
+        collate_fn=collate_fn_test
     )
 
     num = 1
@@ -515,10 +518,10 @@ if __name__ == "__main__":
         os.makedirs(run_path, exist_ok=True)
         logger = setup_logging(run_path)
         
-        if args.adapt:
-            best_model_path = os.path.join(run_path, 'best_model')
-            model_state_dict = torch.load(os.path.join(args.load_model_path, 'pytorch_model.bin'), map_location=args.device)
-            model.load_state_dict(model_state_dict, strict=False)
+        # if args.adapt:
+        #     best_model_path = os.path.join(run_path, 'best_model')
+        #     model_state_dict = torch.load(os.path.join(args.load_model_path, 'pytorch_model.bin'), map_location=args.device)
+        #     model.load_state_dict(model_state_dict, strict=False)
 
         for param in model.parameters():
             param.requires_grad = True
@@ -559,7 +562,7 @@ if __name__ == "__main__":
         wandb.finish()
 
 # # Universal模型(AR)的smoke test
-# python run_truth_loss.py --device "cuda:0" --dataset "mix" --batch_size 4 --lr 1e-5 --epochs 1 --adapt False --smoke_test True
+# python run_truth_loss.py --device "cuda:0" --dataset "mix" --batch_size 4 --lr 1e-5 --epochs 1 --adapt False --smoke_test 
 
 # # Adapt模型(SFT)的smoke test
-# python run_truth_loss.py --device "cuda:0" --dataset "ecg" --batch_size 4 --lr 1e-5 --epochs 1 --adapt True --load_model_path "./gptmodel" --smoke_test True
+# python run_truth_loss.py --device "cuda:0" --dataset "ecg" --batch_size 4 --lr 1e-5 --epochs 1 --adapt True --load_model_path "./gptmodel" --smoke_test

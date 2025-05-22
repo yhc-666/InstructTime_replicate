@@ -101,7 +101,7 @@ def load_TStokenizer(dir_path, data_shape, device):
         1. 加载模型参数
         2. 初始化TStokenizer模型
         3. 加载预训练权重
-        4. 将模型设置为评估模式
+        4. 将模型设置为评估模式并移到指定设备
     """
     json_params_path = os.path.join(dir_path, "args.json")
     model_path = os.path.join(dir_path, "model.pkl")
@@ -111,5 +111,6 @@ def load_TStokenizer(dir_path, data_shape, device):
     vqvae_model = TStokenizer(data_shape=data_shape, hidden_dim=params['hidden_dim'], n_embed=params['n_embed'], wave_length=params['wave_length'])
     vqvae_model.load_state_dict(torch.load(model_path, map_location=device))
     vqvae_model.eval()
+    vqvae_model = vqvae_model.to(device)  # 确保模型移动到指定设备
     
     return vqvae_model

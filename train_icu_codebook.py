@@ -61,7 +61,7 @@ class ICUTimeSeriesDataset(Dataset):
 
 def train_icu_codebook(
     data_root: str,
-    save_dir: str = "./ecg_tokenizer/test_ecg_patch64",
+    save_dir: str = "./ecg_tokenizer",
     *,                            
     hidden_dim: int = 64,
     n_embed: int = 256,
@@ -212,7 +212,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=64)
 
     # 运行环境
-    parser.add_argument("--device",     type=str, default="cpu")
+    parser.add_argument("--device",     type=str, default="cuda")
     parser.add_argument("--smoke_test", action="store_true")
     parser.add_argument("--use_wandb",  action="store_true")
 
@@ -238,6 +238,7 @@ if __name__ == "__main__":
 
 # /Users/haochengyang/Desktop/research/CTPD/MMMSPG-014C/EHR_dataset/mimiciii_benchmark/output_mimic3
 # /home/ubuntu/Virginia/output_mimic3
+# /home/ubuntu/hcy50662/output_mimic3
 
 # python train_icu_codebook.py \
 #     --data_root   /Users/haochengyang/Desktop/research/CTPD/MMMSPG-014C/EHR_dataset/mimiciii_benchmark/output_mimic3 \

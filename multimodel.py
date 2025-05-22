@@ -17,7 +17,6 @@ import torch.nn.functional as F
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
 local_model_path = "./gpt2-model"
-local_tokenizer_path = "./gpt2-tokenizer"
 
 class MLP(nn.Module):
     """
@@ -241,7 +240,7 @@ class MultiTokenizer:
         输入:
             - ecgTokenizers: 时间序列tokenizer列表
         """
-        self.textTokenizer = GPT2Tokenizer.from_pretrained(local_tokenizer_path)
+        self.textTokenizer = GPT2Tokenizer.from_pretrained("gpt2")
         new_special_tokens = ["<BET>", "<EET>"]
         self.textTokenizer.add_special_tokens({"additional_special_tokens": new_special_tokens})
         self.text_vocab_size = len(self.textTokenizer)

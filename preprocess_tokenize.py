@@ -123,13 +123,13 @@ if __name__ == "__main__":
     parser.add_argument("--tokenizer",   required=True, help="保存 args.json/model.pkl 的文件夹")
     parser.add_argument("--out_dir",     default="ts_tokenized_datasets", help="输出根目录")
     parser.add_argument("--keep_notes",  type=int, default=5, help="每个样本保留的note数量")
-    parser.add_argument("--device",      default="cpu")
+    parser.add_argument("--device",      default="cuda")
     parser.add_argument("--smoke_test",  action="store_true", help="仅处理每个 split 的前 30 条样本，用于快速调试")
     args = parser.parse_args()
 
     cfgs = {    
         "ihm":   dict(max_len=48),
-        "pheno": dict(max_len=24),
+        "pheno": dict(max_len=48),
     }
 
     tokenizer = load_TStokenizer(args.tokenizer,
@@ -161,6 +161,7 @@ if __name__ == "__main__":
             print(f"   write {len(data):,} samples  ➟  {pkl_out}")
 
     print("\nDone ✅")
+
 
 
 # /Users/haochengyang/Desktop/research/CTPD/MMMSPG-014C/EHR_dataset/mimiciii_benchmark/output_mimic3
