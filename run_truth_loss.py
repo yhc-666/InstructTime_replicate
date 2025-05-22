@@ -438,7 +438,12 @@ if __name__ == "__main__":
     seed_everything(args.seed)
 
     if args.wandb:
-        wandb.init(project="instructtime", config=vars(args))
+        wandb.init(
+            project  = "Instructime Replicate",
+            name     = f"{args.model}_lr{args.lr}",  # run name
+            group    = "LLM_AR",           # 同一实验组
+            config   = vars(args),                  # 超参入库
+        )
 
     # 构建训练、验证和测试数据集路径
     if args.dataset == "mix":
@@ -501,7 +506,7 @@ if __name__ == "__main__":
 
     num = 1
     for run in range(num):
-        model, sub_path = initialize_model(args, tokenizer, TStokenizers)
+        model, sub_path = initialize_model(args, tokenizer, [ts_tokenizer])
         model_subpath = os.path.join(args.model_path, sub_path)
         print(args.model_path, model_subpath)
 
@@ -529,26 +534,32 @@ if __name__ == "__main__":
         train_model(model, args, TrainDataLoader, ValidDataLoader,
                     optimizer, scheduler, scaler, logger, run_path)
 
-        if args.adapt:
-            model, _ = initialize_model(args, tokenizer)
-            best_model_path = os.path.join(run_path, 'best_model')
-            model_state_dict = torch.load(
-                os.path.join(best_model_path, 'pytorch_model.bin'),
-                map_location=args.device)
-            model.load_state_dict(model_state_dict)
+        # if args.adapt:
+        #     model, _ = initialize_model(args, tokenizer)
+        #     best_model_path = os.path.join(run_path, 'best_model')
+        #     model_state_dict = torch.load(
+        #         os.path.join(best_model_path, 'pytorch_model.bin'),
+        #         map_location=args.device)
+        #     model.load_state_dict(model_state_dict)
 
-            logger.info(f"Test best model for run {run}")
-            print_preds, print_labels = test(model, TestDataLoader, args, logger, out=True)
+        #     logger.info(f"Test best model for run {run}")
+        #     print_preds, print_labels = test(model, TestDataLoader, args, logger, out=True)
 
-            save_path = os.path.join(run_path, 'output.txt')
-            with open(save_path, 'w', encoding='utf-8') as file:
-                for i in range(len(print_labels)):
-                    j = i * args.num_return_sequences
-                    for k in range(args.num_return_sequences):
-                        file.write(f"Generated Text: {print_preds[j + k]}\n")
-                    file.write(f"Actual Label: {print_labels[i]}\n\n")
+        #     save_path = os.path.join(run_path, 'output.txt')
+        #     with open(save_path, 'w', encoding='utf-8') as file:
+        #         for i in range(len(print_labels)):
+        #             j = i * args.num_return_sequences
+        #             for k in range(args.num_return_sequences):
+        #                 file.write(f"Generated Text: {print_preds[j + k]}\n")
+        #             file.write(f"Actual Label: {print_labels[i]}\n\n")
 
         logger.handlers.clear()
 
     if args.wandb:
         wandb.finish()
+
+# # Universal模型(AR)的smoke test
+# python run_truth_loss.py --device "cuda:0" --dataset "mix" --batch_size 4 --lr 1e-5 --epochs 1 --adapt False --smoke_test True
+
+# # Adapt模型(SFT)的smoke test
+# python run_truth_loss.py --device "cuda:0" --dataset "ecg" --batch_size 4 --lr 1e-5 --epochs 1 --adapt True --load_model_path "./gptmodel" --smoke_test True
