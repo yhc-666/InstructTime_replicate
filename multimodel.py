@@ -114,7 +114,7 @@ class InstructTime(GPT2LMHeadModel):
         for tokenizer in self.ecgTokenizers:
             tokenizer_embed_vector = copy.deepcopy(tokenizer.quantize.embed).transpose(-1, 0)
             embed_vector = torch.cat([embed_vector, tokenizer_embed_vector], dim=0)
-        self.embed_layer = nn.Embedding.from_pretrained(embed_vector)   
+        self.embed_layer = nn.Embedding.from_pretrained(embed_vector)   # TS embedding层(由各domain的codebook拼接而成)
         
         self.text_embedding = text_embedding
         self.embed = config.n_embd
@@ -147,16 +147,44 @@ class InstructTime(GPT2LMHeadModel):
         """
         功能: 模型前向传播，处理混合输入
         输入:
-            - input_ids: 输入token ID, shape=[batch_size, seq_len]
+            - input_ids: 输入token ID, shape=[batch_size, seq_len] (其中TS tokens的ID已经包含了offset)
             - attention_mask: 注意力掩码, shape=[batch_size, seq_len]
             - labels: 目标token ID, shape=[batch_size, seq_len]
         输出:
             - outputs: 模型输出, 包含logits和loss
-        处理流程:
-            1. 区分文本token和时间序列token
-            2. 分别处理文本和时间序列embedding
-            3. 将两种embedding合并
-            4. 调用GPT2模型的前向传播
+        
+        pipeline:
+            D=config.n_embd=GPT-2 嵌入维度（默认 768)
+            H=ecgTokenizers[0].hidden_dim,VQ-VAE 码本维度
+            V=text_embedding+∑n_embed,联合词表大小
+                            ┌─────────────────────────────────────────────┐
+            input_ids  ───► │ token 归属判别 text_mask / ecg_mask          │
+                            └┬────────────────────────────────────────────┘
+                            │                                           │
+                            │text token                               TS token
+                            ▼                                           ▼
+                    ┌──────────────────┐                       ┌──────────────────┐
+                    │ GPT-2 word embed │                       │ shared TS embed  │
+                    │  wte (50258*D)   │                       │  (∑n_embed*H)    │
+                    └──────────────────┘                       └──────────────────┘
+                            │                                          │
+                            │                                          │
+                            ▼   zero-out padding                       ▼
+                    text_embeddings  ──────────────────►  projection_layers[i]
+                    (B*L*D)                               (H → D) MLP
+                                                            │
+                                                            ▼
+                                                    ecg_embeddings_i (B*L*D)
+                                                            │
+                                            sum over i ─────┘
+                            └───────────────► 合并 (B*L*D) ◄──────────────────┘
+                                            inputs_embeds
+                                                        │
+                                                        ▼
+                                    GPT-2 Transformer (12 L, 768 D)
+                                                        │
+                                                        ▼
+                                                logits (B*L*V)
         """
         input_ids = kwargs["input_ids"]
 
@@ -178,10 +206,11 @@ class InstructTime(GPT2LMHeadModel):
 
         ecg_embeddings = torch.zeros_like(text_embeddings)
         for i, _ in enumerate(self.ecgTokenizers):
-            tokenizer_mask = (input_ids >= self.offsets[i]) & (input_ids < self.offsets[i + 1])
+            # forward中输入的input_ids已经包含了offset, 而不是domain codebook内的索引id
+            tokenizer_mask = (input_ids >= self.offsets[i]) & (input_ids < self.offsets[i + 1]) 
             tokenizer_ids = input_ids.clone()
             tokenizer_ids[~tokenizer_mask] = 0
-            tokenizer_ids[tokenizer_mask] -= self.offsets[i]
+            tokenizer_ids[tokenizer_mask] -= self.text_embedding
 
             tokenizer_embeddings = self.embed_layer(tokenizer_ids)
             tokenizer_embeddings = self.projection_layers[i](tokenizer_embeddings)

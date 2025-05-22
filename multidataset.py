@@ -20,7 +20,7 @@ class MultiDataset(Dataset):
     功能: 多领域数据集类，用于创建时间序列和文本指令的混合数据集
     属性:
         - samples: 样本列表，每个样本为(text, time_series, _)的三元组
-        - tokenizer: MultiTokenizer实例，用于编码文本和时间序列
+        - tokenizer: MultiTokenizer实例, 用于编码文本和时间序列
         - mode: 运行模式，'train'或'test'
         - max_length: 输入序列的最大长度
         - multi: 时间序列数据类型标识('mix', 'geo', 'sleep', 'esr'等)

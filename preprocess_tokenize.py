@@ -129,7 +129,7 @@ if __name__ == "__main__":
 
     cfgs = {    
         "ihm":   dict(max_len=48),
-        "pheno": dict(max_len=48),
+        "pheno": dict(max_len=24),
     }
 
     tokenizer = load_TStokenizer(args.tokenizer,
