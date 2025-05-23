@@ -9,3 +9,5 @@ ts_tokenized_datasets
 wandb
 
 gptmodel
+
+production_model

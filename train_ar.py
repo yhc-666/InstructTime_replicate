@@ -92,7 +92,7 @@ def validate_ar(model, loader, device, logger):
             step += 1
     avg_loss = loss_sum / step
     ppl = float(np.exp(avg_loss))
-    logger.info(f"Validation Loss: {avg_loss:.4f} | PPL: {ppl:.2f}")
+    print(f"Validation Loss: {avg_loss:.4f} | PPL: {ppl:.2f}")
     return avg_loss, ppl
 
 
@@ -120,7 +120,7 @@ def train_model(model, args, train_loader, valid_loader, optimizer, scheduler, s
             step += 1
             tqdm_iter.set_postfix({"loss": format(train_losses / step, ".4f")})
         train_loss = train_losses / step
-        logger.info(f"Epoch {epoch+1}\nLoss: {train_loss:.4f}")
+        print(f"Epoch {epoch+1}\nLoss: {train_loss:.4f}")
         val_loss, val_ppl = validate_ar(model, valid_loader, args.device, logger)
         if args.wandb:
             wandb.log({
@@ -136,7 +136,7 @@ def train_model(model, args, train_loader, valid_loader, optimizer, scheduler, s
         else:
             patience_cnt += 1
             if patience_cnt >= patience:
-                logger.info("Early stopping triggered")
+                print("Early stopping triggered")
                 break
 
 
@@ -203,7 +203,14 @@ def main():
     )
     scaler = GradScaler()
 
-    logger.info("Begin training")
+    # 打印训练样本数量
+    train_samples_count = len(train_loader.dataset)
+    val_samples_count = len(val_loader.dataset)
+    print(train_loader.dataset.samples[0])
+    print(f"训练样本总数: {train_samples_count}")
+    print(f"验证样本总数: {val_samples_count}")
+
+    print("Begin training")
     train_model(model, args, train_loader, val_loader, optimizer, scheduler, scaler, logger, run_path)
 
     if args.wandb:
@@ -217,7 +224,7 @@ if __name__ == "__main__":
 #     --seed 42 \
 #     --dataset mix \
 #     --batch_size 32 \
-#     --encoder_max_length 768 \
+#     --encoder_max_length 1024 \
 #     --lr 1e-5 \
 #     --warm_up_ratio 0.05 \
 #     --epochs 50 \
