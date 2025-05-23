@@ -26,7 +26,6 @@ pyarrow==11.0.0
 pydantic==2.5.3
 pydantic_core==2.14.6
 pyts==0.13.0
-pywin32==305.1
 scipy==1.11.4
 smart-open==6.4.0
 soundfile==0.12.1
