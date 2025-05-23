@@ -51,11 +51,26 @@ def initialize_model(device: str, tokenizer: MultiTokenizer, ts_tokenizers, pret
     pretrained_gpt2_model = GPT2LMHeadModel.from_pretrained(pretrained)
     model.load_state_dict(pretrained_gpt2_model.state_dict(), strict=False)
 
+    # ① 由于新增 <BET>, <EET> 两个文本 token，先把 wte (50259→50261)
+    #    也就是 nn.Embedding(vocab_txt, hidden) 扩容。
+    #    新行随机 ~ N(0, config.initializer_range²)；lm_head 会一起扩且仍与 wte 绑权重。
     model.resize_token_embeddings(len(tokenizer.textTokenizer))
-    current_output = model.get_output_embeddings()
+
+    # ② 保留“扩好后仍 tied 的 lm_head”权重视图，稍后拷贝到自定义更大 lm_head。
+    current_output = model.get_output_embeddings()   # shape (50261, hidden)
+
+    # ③ 新建一个更大的的 lm_head：行 = 文本 50261 + ΣK_i(codebooks)，列 = hidden
     new_output = nn.Linear(config.n_embd, tokenizer.vocabSize_all(), bias=False).to(device)
+
+    # ④ 继承文本部分权重；codebook 行保持随机初始化
     new_output.weight.data[: len(tokenizer.textTokenizer)] = current_output.weight.data
+
+    # ⑤ 替换输出投影，解除 wte 与 lm_head 的 weight-tying
     model.set_output_embeddings(new_output)
+    #    - 输入端 wte 只覆盖 0-50260 的文本 ID
+    #    - 输出端可预测文本 ID + 各 codebook token
+    #    - codebook token 的输入嵌入由 TSEmbedding 负责
+
     model.config.vocab_size = tokenizer.vocabSize_all()
 
     sub_path = "no_frozen"
@@ -197,3 +212,16 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# python train_ar.py \
+#     --seed 42 \
+#     --dataset mix \
+#     --batch_size 32 \
+#     --encoder_max_length 768 \
+#     --lr 1e-5 \
+#     --warm_up_ratio 0.05 \
+#     --epochs 50 \
+#     --pretrained_model gpt2 \
+#     --model_path ./production_model \
+#     --device cuda:0 \
+#     --wandb
