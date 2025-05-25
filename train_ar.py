@@ -78,6 +78,14 @@ def initialize_model(device: str, tokenizer: MultiTokenizer, ts_tokenizers, pret
 
 
 def validate_ar(model, loader, device, logger):
+    """
+    在validaton set上计算PPL与Loss
+    PPL 是在整个序列上计算的：
+    输入序列：[问题部分] + [答案部分] + [EOS]
+    标签序列：与输入序列相同
+    损失计算：模型对整个序列进行 next-token prediction, 使用标准的 shift-1 交叉熵损失
+    PPL 计算：基于整个序列的平均损失
+    """
     model.eval()
     loss_sum = 0.0
     step = 0

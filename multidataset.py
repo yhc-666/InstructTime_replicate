@@ -1,9 +1,5 @@
 """Datasets for autoregressive (AR) and supervised fine-tuning (SFT) training.
 
-The original :class:`MultiDataset` mixed AR and SFT logic in a single class.
-This file separates the behaviour into two explicit subclasses so that the
-data processing logic is clearer.
-
 Each dataset supports ``train`` and ``test`` modes.  ``train`` mode is used for
 both training and validation.  ``test`` mode is used for evaluation.
 
@@ -106,7 +102,7 @@ class _BaseDataset(Dataset):
                 self.samples.append(
                     {
                         "ts_ids": item["ts_ids"],
-                        "notes": item["notes"],
+                        "notes": item["notes"][-2:-1],
                         "label": item["label"],
                         "task": task,
                     }
@@ -187,12 +183,9 @@ class ARDataset(_BaseDataset):
         label_ids = self.tokenizer.encode(" " + label_text)
         eos_id = self.tokenizer.eos_token_id
 
-        if self.mode == "train":
-            input_ids = base_ids + label_ids + [eos_id]
-            labels = input_ids.copy()
-        else:  # test/val
-            input_ids = base_ids + [eos_id]
-            labels = label_ids + [eos_id]
+        # ARDataset 只支持训练/验证时采用相同的数据格式
+        input_ids = base_ids + label_ids + [eos_id]
+        labels = input_ids.copy()
 
         attn_masks = [1] * len(input_ids)
         input_ids, attn_masks = self._padding(input_ids, attn_masks)
@@ -215,7 +208,7 @@ class SFTDataset(_BaseDataset):
         label_ids = self.tokenizer.encode(" " + label_text)
         eos_id = self.tokenizer.eos_token_id
 
-        if self.mode == "train": # 训练模式
+        if self.mode == "train": # train模式
             input_ids = base_ids + label_ids + [eos_id]
             labels = [-100] * len(base_ids) + label_ids + [eos_id]
             attn_masks = [1] * len(input_ids)
@@ -227,21 +220,21 @@ class SFTDataset(_BaseDataset):
                 "label_ids": torch.LongTensor(labels),
             }
 
-        # validation/test模式
-        input_ids = base_ids + [eos_id]
-        attn_masks = [1] * len(input_ids)
-        input_ids, attn_masks = self._padding(input_ids, attn_masks)
+        if self.mode == "test":
+            # validation/test模式：只提供问题部分，让模型生成答案
+            input_ids = base_ids  # 不添加EOS，让模型从"Answer Output:\n"后开始生成
+            attn_masks = [1] * len(input_ids)
+            input_ids, attn_masks = self._padding(input_ids, attn_masks)
 
-        label_tensor = (
-            torch.tensor(sample["label"], dtype=torch.long)
-            if isinstance(sample["label"], list)
-            else torch.tensor(int(sample["label"]), dtype=torch.long)
-        )
+            label_tensor = (
+                torch.tensor(sample["label"], dtype=torch.long)
+                if isinstance(sample["label"], list)
+                else torch.tensor(int(sample["label"]), dtype=torch.long)
+            )
 
-        return {
-            "input_ids": torch.LongTensor(input_ids),
-            "attn_masks": torch.FloatTensor(attn_masks),
-            "label_ids": torch.LongTensor(labels), # 用于计算语言损失
-            "label": label_tensor, # 用于计算AUROC/AUPRC/F1指标
-        }
+            return {
+                "input_ids": torch.LongTensor(input_ids), # [问题部分], 用于输入模型生成回复
+                "attn_masks": torch.FloatTensor(attn_masks),
+                "label": label_tensor, # 原始标签, 用于结合模型生成的回复计算AUROC/AUPRC/F1指标
+            }
 
