@@ -16,6 +16,8 @@ import wandb
 from multimodel import InstructTime, MultiTokenizer
 from datamodules import build_sft_dataloaders
 from utils import load_TStokenizer
+from multidataset import PHENO_LABELS
+from metrics import compute_metrics
 
 vqvae_path = "TStokenizer/Vq_weight"
 DATA_ROOT = "ts_tokenized_datasets"
@@ -62,26 +64,56 @@ def initialize_model(device: str, tokenizer: MultiTokenizer, ts_tokenizers, weig
     return model, sub_path
 
 
-def validate_sft(model, loader, device, logger):
+IHM_LABEL_MAP = {
+    "the patient will survive": 0,
+    "the patient will die": 1,
+}
+PHENO_LABEL_MAP = {l.lower(): i for i, l in enumerate(PHENO_LABELS)}
+
+
+def validate_sft(model, loader, device, tokenizer, dataset, logger):
+    """Generate answers and compute F1/ACC metrics."""
     model.eval()
-    loss_sum = 0.0
-    step = 0
+    pred_ihm, gold_ihm = [], []
+    pred_pheno, gold_pheno = [], []
     with torch.no_grad():
         for data in tqdm(loader, desc="Val", ncols=120):
             input_ids = data["input_ids"].to(device)
             attention_mask = data["attention_mask"].to(device)
-            label_ids = data["label_ids"].to(device)
-            with autocast():
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=label_ids)
-            loss_sum += outputs.loss.item()
-            step += 1
-    avg_loss = loss_sum / step
-    logger.info(f"Validation Loss: {avg_loss:.4f}")
-    return avg_loss
+            labels = data["label"]
+
+            gen_ids = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=32,
+                num_beams=1,
+            )
+
+            for g, l in zip(gen_ids, labels):
+                text = tokenizer.decode(g.tolist(), skip_special_tokens=True)
+                if l.dim() == 0 or l.numel() == 1:
+                    pred_ihm.append(text)
+                    gold_ihm.append(int(l.item()))
+                else:
+                    pred_pheno.append(text)
+                    gold_pheno.append(l.numpy().tolist())
+
+    results = {}
+    if pred_ihm:
+        results["ihm"] = compute_metrics(pred_ihm, gold_ihm, "ihm", IHM_LABEL_MAP)
+        logger.info(
+            f"IHM Val ACC: {results['ihm']['acc']:.4f} | F1: {results['ihm']['f1']:.4f}"
+        )
+    if pred_pheno:
+        results["pheno"] = compute_metrics(pred_pheno, gold_pheno, "pheno", PHENO_LABEL_MAP)
+        logger.info(
+            f"Pheno Val ACC: {results['pheno']['acc']:.4f} | F1: {results['pheno']['f1']:.4f}"
+        )
+    return results
 
 
-def train_model(model, args, train_loader, valid_loader, optimizer, scheduler, scaler, logger, run_path):
-    best_loss = float("inf")
+def train_model(model, args, train_loader, valid_loader, optimizer, scheduler, scaler, logger, run_path, tokenizer):
+    best_f1 = -1.0
     patience = 3
     patience_cnt = 0
     for epoch in range(args.epochs):
@@ -105,11 +137,20 @@ def train_model(model, args, train_loader, valid_loader, optimizer, scheduler, s
             tqdm_iter.set_postfix({"loss": format(train_losses / step, ".4f")})
         train_loss = train_losses / step
         logger.info(f"Epoch {epoch+1}\nLoss: {train_loss:.4f}")
-        val_loss = validate_sft(model, valid_loader, args.device, logger)
+        metrics = validate_sft(model, valid_loader, args.device, tokenizer, args.dataset, logger)
+
+        if args.dataset == "ihm":
+            val_f1 = metrics["ihm"]["f1"]
+        elif args.dataset == "pheno":
+            val_f1 = metrics["pheno"]["f1"]
+        else:
+            val_f1 = (metrics["ihm"]["f1"] + metrics["pheno"]["f1"]) / 2
+
         if args.wandb:
-            wandb.log({"epoch": epoch + 1, "train_loss": train_loss, "val_loss": val_loss})
-        if val_loss < best_loss:
-            best_loss = val_loss
+            wandb.log({"epoch": epoch + 1, "train_loss": train_loss, "val_f1": val_f1})
+
+        if val_f1 > best_f1:
+            best_f1 = val_f1
             patience_cnt = 0
             model.save_pretrained(os.path.join(run_path, "best_model"))
         else:
@@ -195,7 +236,7 @@ def main():
     scaler = GradScaler()
 
     logger.info("Begin training")
-    train_model(model, args, train_loader, val_loader, optimizer, scheduler, scaler, logger, run_path)
+    train_model(model, args, train_loader, val_loader, optimizer, scheduler, scaler, logger, run_path, tokenizer)
 
     if args.wandb:
         wandb.finish()

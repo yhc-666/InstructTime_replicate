@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 from challeng_score import evaluate_model
 from sklearn.metrics import f1_score, hamming_loss
+from typing import List, Union, Dict
 
 def get_dict(Path):
     mapping_file = Path
@@ -285,3 +286,70 @@ def metric_rwc(preds, labels, logger):
     )
 
     return hit2, zero_preds, zero_labels
+
+
+def compute_metrics(
+    pred_texts: List[str],
+    gold_labels: Union[np.ndarray, List],
+    task: str,
+    label_map: Dict[str, int],
+) -> Dict[str, float]:
+    """Compute F1 score and accuracy for IHM or Pheno tasks.
+
+    Parameters
+    ----------
+    pred_texts : List[str]
+        LLM decode后的句子列表
+    gold_labels : Union[np.ndarray, List]
+        IHM场景下为`list[int]`, PHENO场景下为多热编码的 ``np.ndarray``
+    task : str
+        ``ihm`` 或 ``pheno``
+    label_map : Dict[str, int]
+        文本标签与索引的映射 ``{"atrial fibrillation":0, ...}``
+
+    Returns
+    -------
+    Dict[str, float]
+        ``{"f1": float, "acc": float}``
+    """
+
+    if task not in {"ihm", "pheno"}:
+        raise ValueError("task must be 'ihm' or 'pheno'")
+
+    gold_array = np.array(gold_labels)
+    preds = []
+
+    if task == "ihm":
+        for text in pred_texts:
+            text_l = text.lower()
+            pred = -1
+            for k, v in label_map.items():
+                if k.lower() in text_l:
+                    pred = v
+                    break
+            preds.append(pred)
+
+        preds_arr = np.array(preds)
+        acc = float(np.mean(preds_arr == gold_array))
+        valid_mask = preds_arr != -1
+        if valid_mask.any():
+            f1 = float(
+                f1_score(gold_array[valid_mask], preds_arr[valid_mask], average="binary", zero_division=0)
+            )
+        else:
+            f1 = 0.0
+        return {"f1": f1, "acc": acc}
+
+    # pheno task (multi-label)
+    for text in pred_texts:
+        text_l = text.lower()
+        vec = np.zeros(len(label_map), dtype=int)
+        for k, v in label_map.items():
+            if k.lower() in text_l:
+                vec[v] = 1
+        preds.append(vec)
+
+    preds_arr = np.array(preds)
+    acc = float(np.mean(np.all(preds_arr == gold_array, axis=1)))
+    f1 = float(f1_score(gold_array, preds_arr, average="samples", zero_division=0))
+    return {"f1": f1, "acc": acc}
