@@ -91,17 +91,12 @@ LLM自回归训练是在预训练的GPT2模型基础上，结合时间序列toke
    - 使用`train_model`函数进行自回归训练
    - 训练过程中监控损失函数变化
 
-4. **评估模型**
-   - 使用`test`函数评估模型性能
-   - 在测试集上生成预测结果
-   - 计算评估指标并保存最佳模型
-
 ### 涉及的主要文件和函数
 
-- **run_truth_loss.py**：主训练脚本
-  - `initialize_model`：初始化InstructTime模型
-  - `train_model`：训练模型的主函数
-  - `test`：评估模型性能
+- **train_ar.py**：自回归预训练脚本
+  - `initialize_model`：初始化 InstructTime 模型
+  - `train_model`：训练循环
+  - `validate_ar`：验证评估函数
 
 - **multimodel.py**：模型定义
   - `InstructTime`：主模型类，继承自GPT2
@@ -118,16 +113,26 @@ LLM自回归训练是在预训练的GPT2模型基础上，结合时间序列toke
 ### 执行命令示例
 
 ```bash
-# 训练Universal模型
-python run_truth_loss.py --device "cuda:0" --dataset "mix" --batch_size 16 --lr 1e-5 --epochs 15 --adapt False
+# 训练混合(MIX)数据集的自回归模型
+python train_ar.py \
+  --device "cuda:0" \
+  --dataset "mix" \
+  --batch_size 16 \
+  --lr 1e-5 \
+  --epochs 15
 
-# 训练适应特定领域的模型
-python run_truth_loss.py --device "cuda:0" --dataset "ecg" --batch_size 16 --lr 1e-5 --epochs 10 --adapt True --load_model_path "./gptmodel"
+# 仅在 IHM 数据上训练自回归模型
+python train_ar.py \
+  --device "cuda:0" \
+  --dataset "ihm" \
+  --batch_size 16 \
+  --lr 1e-5 \
+  --epochs 10
 ```
 
-## 下游指令微调流程
+## 下游SFT
 
-下游指令微调是在自回归预训练后的模型基础上，针对特定任务进行微调，使模型能够根据指令生成合适的输出。与自回归(AR)训练采用的是同一套代码和同一个运行脚本`run_truth_loss.py`
+下游指令微调在自回归预训练后的模型基础上，使用 `train_sft.py` 脚本针对特定任务进行微调，复用了相同的数据处理与模型模块。
 
 ### 关键步骤
 
@@ -150,59 +155,89 @@ python run_truth_loss.py --device "cuda:0" --dataset "ecg" --batch_size 16 --lr 
    - 保存性能最佳的模型版本
    - 进行模型推理测试
 
-
 ### 执行命令示例
 
 ```bash
-# 对通用模型进行指令微调
-python run_truth_loss.py --device "cuda:0" --dataset "mix" --batch_size 8 --lr 5e-6 --epochs 5 --adapt True --load_model_path "./universal_model"
+# 在 MIX 数据集上进行指令微调
+python train_sft.py \
+  --device "cuda:0" \
+  --dataset "mix" \
+  --init_model_path "./gptmodel/no_frozen/run_0/best_model" \
+  --batch_size 8 \
+  --lr 5e-6 \
+  --epochs 5
 
-# 在特定领域数据上进行指令微调
-python run_truth_loss.py --device "cuda:0" --dataset "ecg" --batch_size 8 --lr 5e-6 --epochs 5 --adapt True --load_model_path "./pretrained_model"
+# 在 IHM 数据集上进行指令微调
+python train_sft.py \
+  --device "cuda:0" \
+  --dataset "ihm" \
+  --init_model_path "./pretrained_ar_model" \
+  --batch_size 8 \
+  --lr 5e-6 \
+  --epochs 5
 ```
 
-## 模型推理流程
 
-完成训练和微调后，可以使用模型进行推理预测：
-
-1. 加载训练好的模型
-2. 准备输入数据(时间序列和指令文本)
-3. 使用模型生成预测结果
-4. 解码和后处理预测结果
-
-### 推理示例
-
-```python
-# 加载模型和tokenizer
-model = InstructTime.from_pretrained("./best_model")
-tokenizer = MultiTokenizer(ecgTokenizers)
-
-# 准备输入
-text = "分析这段心电图信号并提供诊断结果："
-time_series_data = load_ecg_data("patient_123.npy")
-
-# 编码输入
-input_ids = tokenizer.encode(text, time_series_data)
-
-# 生成预测
-outputs = model.generate(
-    input_ids=input_ids,
-    max_new_tokens=100,
-    num_beams=5,
-    do_sample=False
-)
-
-# 解码输出
-prediction = tokenizer.decode(outputs[0])
-print("预测结果:", prediction)
-```
-
-## One of Instructime's Prompt
+## Prompt exaples
+**IHM example**
 
 ```
-You will be receiving electroencephalogram(EEG) related signals.
-EEG: <BET><TS Tokens><EET>
-The sleep patterns include waking up, rapid eye movement sleep, and sleep stages one through four, as well as periods of movement and unidentified stages.
-Select one of the eight previously mentioned sleep patterns and report on the person's sleep using the provided information.
-The person's sleep pattern is waking up
+
+Given the 48-hour ICU multivariate vital-sign sequence and doctors' notes below, predict whether the patient will die in hospital.
+The possible outcomes are: the patient will survive; the patient will die.
+
+Doctors' notes:
+[Note-1] 
+…
+[Note-K] 
+
+Vital-sign time-series:
+<BET> <TS_TOKENS> <EET>.
+
+Answer Output:
+
+The patient will die.
+```
+
+**Pheno example**
+```
+Given the 24-hour ICU multivariate vital-sign sequence and doctors' notes below, select all phenotypes that apply to this ICU stay and briefly state them.
+The 25 possible phenotypes include:
+Acute and unspecified renal failure,
+Acute cerebrovascular disease,
+Acute myocardial infarction,
+Cardiac dysrhythmias,
+Chronic kidney disease,
+Chronic obstructive pulmonary disease and bronchiectasis,
+Complications of surgical procedures or medical care,
+Conduction disorders,
+Congestive heart failure; nonhypertensive,
+Coronary atherosclerosis and other heart disease,
+Diabetes mellitus with complications,
+Diabetes mellitus without complication,
+Disorders of lipid metabolism,
+Essential hypertension,
+Fluid and electrolyte disorders,
+Gastrointestinal hemorrhage,
+Hypertension with complications and secondary hypertension,
+Other liver diseases,
+Other lower respiratory disease,
+Other upper respiratory disease,
+Pleurisy; pneumothorax; pulmonary collapse,
+Pneumonia (except that caused by tuberculosis or sexually transmitted disease),
+Respiratory failure; insufficiency; arrest (adult),
+Septicemia (except in labor),
+Shock.
+
+Doctors' notes:
+[Note-1] 
+…
+[Note-K] 
+
+Vital-sign time-series:
+<BET> <TS_TOKENS> <EET>.
+
+Answer Output:
+
+The patient presents … and … and ... 
 ```

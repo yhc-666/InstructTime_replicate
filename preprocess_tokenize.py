@@ -171,4 +171,3 @@ if __name__ == "__main__":
 #    --tokenizer   TStokenizer/Vq_weight \
 #    --device      cpu \
 #    --smoke_test
-

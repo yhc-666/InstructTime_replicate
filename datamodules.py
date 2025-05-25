@@ -30,7 +30,7 @@ collate_fn_ar_valid = collate_fn_ar_train
 
 
 def collate_fn_sft_train(batch):
-    """Collate function for SFT train/validation."""
+    """Collate function for SFT train"""
     input_ids = [b["input_ids"] for b in batch]
     attention_mask = [b["attn_masks"] for b in batch]
     label_ids = [b["label_ids"] for b in batch]
@@ -45,15 +45,16 @@ collate_fn_sft_valid = collate_fn_sft_train
 
 
 def collate_fn_sft_test(batch):
-    """Collate function for SFT testing."""
+    """Collate function for SFT validation/testing."""
     input_ids = [b["input_ids"] for b in batch]
     attention_mask = [b["attn_masks"] for b in batch]
+    label_ids = [b["label_ids"] for b in batch]
     labels = [b["label"] for b in batch]
-    labels = torch.stack(labels)
     return {
         "input_ids": torch.stack(input_ids),
         "attention_mask": torch.stack(attention_mask),
-        "label": labels,
+        "label": torch.stack(labels),
+        "label_ids": torch.stack(label_ids),
     }
 
 
@@ -87,7 +88,7 @@ def build_sft_dataloaders(
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """Construct dataloaders for SFT training."""
     train_ds = SFTDataset(train_files, tokenizer, mode="train", encoder_max_length=encoder_max_length)
-    val_ds = SFTDataset(val_files, tokenizer, mode="train", encoder_max_length=encoder_max_length)
+    val_ds = SFTDataset(val_files, tokenizer, mode="test", encoder_max_length=encoder_max_length)
     test_ds = SFTDataset(test_files, tokenizer, mode="test", encoder_max_length=encoder_max_length)
     train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, collate_fn=collate_fn_sft_train)
     val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, collate_fn=collate_fn_sft_valid)

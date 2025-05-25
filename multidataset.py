@@ -106,7 +106,7 @@ class _BaseDataset(Dataset):
                 self.samples.append(
                     {
                         "ts_ids": item["ts_ids"],
-                        "notes": item["notes"][-2:-1],
+                        "notes": item["notes"],
                         "label": item["label"],
                         "task": task,
                     }
@@ -215,7 +215,7 @@ class SFTDataset(_BaseDataset):
         label_ids = self.tokenizer.encode(" " + label_text)
         eos_id = self.tokenizer.eos_token_id
 
-        if self.mode == "train":
+        if self.mode == "train": # 训练模式
             input_ids = base_ids + label_ids + [eos_id]
             labels = [-100] * len(base_ids) + label_ids + [eos_id]
             attn_masks = [1] * len(input_ids)
@@ -227,7 +227,7 @@ class SFTDataset(_BaseDataset):
                 "label_ids": torch.LongTensor(labels),
             }
 
-        # test mode
+        # validation/test模式
         input_ids = base_ids + [eos_id]
         attn_masks = [1] * len(input_ids)
         input_ids, attn_masks = self._padding(input_ids, attn_masks)
@@ -241,6 +241,7 @@ class SFTDataset(_BaseDataset):
         return {
             "input_ids": torch.LongTensor(input_ids),
             "attn_masks": torch.FloatTensor(attn_masks),
-            "label": label_tensor,
+            "label_ids": torch.LongTensor(labels), # 用于计算语言损失
+            "label": label_tensor, # 用于计算AUROC/AUPRC/F1指标
         }
 
