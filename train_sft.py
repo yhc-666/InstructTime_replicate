@@ -10,10 +10,10 @@ import torch.nn as nn
 from tqdm import tqdm
 from torch.cuda.amp import autocast, GradScaler
 import transformers
-from transformers import GPT2Config, GPT2LMHeadModel
+from transformers import GPT2Config, GPT2LMHeadModel, LlamaConfig, LlamaForCausalLM
 import wandb
 
-from multimodel import InstructTime, MultiTokenizer
+from multimodel import InstructTime, InstructTimeLlama, MultiTokenizer
 from datamodules import build_sft_dataloaders
 from utils import load_TStokenizer
 from multidataset import PHENO_LABELS
@@ -47,40 +47,59 @@ def setup_logging(run_path: str) -> logging.Logger:
     return logger
 
 
-def initialize_model(device: str, tokenizer: MultiTokenizer, ts_tokenizers, weight_path: str):
+def initialize_model(device: str, tokenizer: MultiTokenizer, ts_tokenizers, weight_path: str, base_model: str):
     """
     加载完整的AR训练后的InstructTime模型权重
     Args:
         weight_path: AR训练后保存的InstructTime模型路径 (包含config.json和模型权重文件:model.safetensors或pytorch_model.bin)
     """
     try:
-        # 尝试使用自定义的from_pretrained方法加载完整的InstructTime模型
-        model = InstructTime.from_pretrained(
-            model_path=weight_path,
-            ecgTokenizers=ts_tokenizers,
-            text_embedding=len(tokenizer.textTokenizer),
-            device=device
-        )
+        # 根据基座类型调用对应的 from_pretrained
+        if base_model.lower() == "llama3":
+            model = InstructTimeLlama.from_pretrained(
+                model_path=weight_path,
+                ecgTokenizers=ts_tokenizers,
+                text_embedding=len(tokenizer.textTokenizer),
+                device=device,
+            )
+        else:
+            model = InstructTime.from_pretrained(
+                model_path=weight_path,
+                ecgTokenizers=ts_tokenizers,
+                text_embedding=len(tokenizer.textTokenizer),
+                device=device,
+            )
         print("Successfully loaded complete InstructTime model using from_pretrained method")
         
     except (FileNotFoundError, Exception) as e:
         print(f"Failed to load complete InstructTime model: {e}")
-        print("Falling back to GPT2 initialization...")
+        print("Falling back to base model initialization...")
         
-        # 回退到原来的方法：只加载GPT2部分并重新初始化其他组件
-        config = GPT2Config.from_pretrained(weight_path)
-        model = InstructTime(config, ts_tokenizers, text_embedding=len(tokenizer.textTokenizer)).to(device)
-        
-        pretrained_gpt2_model = GPT2LMHeadModel.from_pretrained(weight_path)
-        model.load_state_dict(pretrained_gpt2_model.state_dict(), strict=False)
+        if base_model.lower() == "llama3":
+            config = LlamaConfig.from_pretrained("meta-llama/Meta-Llama-3-8B")
+            model = InstructTimeLlama(config, ts_tokenizers, text_embedding=len(tokenizer.textTokenizer)).to(device)
+            pretrained_llama_model = LlamaForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8B")
+            model.load_state_dict(pretrained_llama_model.state_dict(), strict=False)
 
-        # 重新设置扩展的embedding和lm_head
-        model.resize_token_embeddings(len(tokenizer.textTokenizer))
-        current_output = model.get_output_embeddings()
-        new_output = nn.Linear(config.n_embd, tokenizer.vocabSize_all(), bias=False).to(device)
-        new_output.weight.data[: len(tokenizer.textTokenizer)] = current_output.weight.data
-        model.set_output_embeddings(new_output)
-        model.config.vocab_size = tokenizer.vocabSize_all()
+            model.resize_token_embeddings(len(tokenizer.textTokenizer))
+            current_output = model.get_output_embeddings()
+            new_output = nn.Linear(config.hidden_size, tokenizer.vocabSize_all(), bias=False).to(device)
+            new_output.weight.data[: len(tokenizer.textTokenizer)] = current_output.weight.data
+            model.set_output_embeddings(new_output)
+            model.config.vocab_size = tokenizer.vocabSize_all()
+        else:
+            # 回退到GPT2
+            config = GPT2Config.from_pretrained("gpt2")
+            model = InstructTime(config, ts_tokenizers, text_embedding=len(tokenizer.textTokenizer)).to(device)
+            pretrained_gpt2_model = GPT2LMHeadModel.from_pretrained("gpt2")
+            model.load_state_dict(pretrained_gpt2_model.state_dict(), strict=False)
+
+            model.resize_token_embeddings(len(tokenizer.textTokenizer))
+            current_output = model.get_output_embeddings()
+            new_output = nn.Linear(config.n_embd, tokenizer.vocabSize_all(), bias=False).to(device)
+            new_output.weight.data[: len(tokenizer.textTokenizer)] = current_output.weight.data
+            model.set_output_embeddings(new_output)
+            model.config.vocab_size = tokenizer.vocabSize_all()
 
     sub_path = "no_frozen"
     return model, sub_path
@@ -98,6 +117,8 @@ def validate_sft(model, loader, device, tokenizer, dataset, logger):
     model.eval()
     pred_ihm, gold_ihm = [], []
     pred_pheno, gold_pheno = [], []
+    last_response_text = ""
+    last_response_token_ids = []
     with torch.no_grad():
         for data in tqdm(loader, desc="Val", ncols=120):
             input_ids = data["input_ids"].to(device)
@@ -109,6 +130,11 @@ def validate_sft(model, loader, device, tokenizer, dataset, logger):
                 attention_mask=attention_mask,
                 max_new_tokens=32,
                 num_beams=1,
+                do_sample=False,  # 使用贪心解码
+                eos_token_id=tokenizer.eos_token_id,  # 明确指定EOS token
+                pad_token_id=tokenizer.pad_token_id,  # 明确指定PAD token
+                early_stopping=True,  # 遇到EOS token时提前停止
+                repetition_penalty=1.1,  # 添加重复惩罚
             )
 
             for g, l, input_id in zip(gen_ids, labels, input_ids):
@@ -117,10 +143,14 @@ def validate_sft(model, loader, device, tokenizer, dataset, logger):
                 # 获取输入文本
                 input_text = tokenizer.decode(input_id.tolist(), skip_special_tokens=True)
                 # 提取模型回复部分（去掉输入部分）
-                if full_text.startswith(input_text):
-                    response_text = full_text[len(input_text):].strip()
-                else:
-                    response_text = full_text
+                response_text = full_text[len(input_text):].strip()
+                # 获取回复部分对应的token IDs
+                input_length = len(input_id)
+                response_token_ids = g[input_length:].tolist()
+                
+                # 保存最后一个样本的信息用于打印
+                last_response_text = response_text
+                last_response_token_ids = response_token_ids
                 
                 if l.dim() == 0 or l.numel() == 1:
                     pred_ihm.append(response_text)
@@ -128,7 +158,9 @@ def validate_sft(model, loader, device, tokenizer, dataset, logger):
                 else:
                     pred_pheno.append(response_text)
                     gold_pheno.append(l.numpy().tolist())
-    print('last response:', response_text)
+    print('total token length:', len(last_response_token_ids))
+    print('last response:', last_response_text)
+    print('last response token ids:', last_response_token_ids)
     results = {}
     if pred_ihm:
         results["ihm"] = compute_metrics(pred_ihm, gold_ihm, "ihm", IHM_LABEL_MAP)
@@ -203,6 +235,7 @@ def main():
     parser.add_argument("--num_return_sequences", type=int, default=1)
     parser.add_argument("--smoke_test", action="store_true")
     parser.add_argument("--wandb", action="store_true")
+    parser.add_argument("--base_model", type=str, default="gpt2", choices=["gpt2", "llama3"])
     args = parser.parse_args()
 
     seed_everything(args.seed)
@@ -229,7 +262,7 @@ def main():
         test_files = os.path.join(DATA_ROOT, args.dataset, "tokenized_v1_patch64", "test.pkl")
 
     ts_tokenizer = load_TStokenizer(vqvae_path, data_shape=(48, 34), device="cpu")
-    tokenizer = MultiTokenizer([ts_tokenizer])
+    tokenizer = MultiTokenizer([ts_tokenizer], base_model=args.base_model)
 
     train_loader, val_loader, _ = build_sft_dataloaders(
         train_files,
@@ -244,7 +277,7 @@ def main():
         train_loader.dataset.samples = train_loader.dataset.samples[:30]
         val_loader.dataset.samples = val_loader.dataset.samples[:30]
 
-    model, sub_path = initialize_model(args.device, tokenizer, [ts_tokenizer], args.init_model_path)
+    model, sub_path = initialize_model(args.device, tokenizer, [ts_tokenizer], args.init_model_path, args.base_model)
     model_subpath = os.path.join(args.model_path, sub_path)
     os.makedirs(model_subpath, exist_ok=True)
     run_path = os.path.join(model_subpath, "run_0")
@@ -273,10 +306,77 @@ if __name__ == "__main__":
     main()
 
 
-# 使用完整InstructTime模型权重的示例：
-# python train_sft.py --init_model_path production_model/no_frozen/run_0/best_model --smoke_test
+# ==================== CLI 示范代码 ====================
 
-# 注意：
+# 使用 GPT-2 基座的 AR 模型进行 SFT 训练
+# python train_sft.py \
+#     --seed 42 \
+#     --base_model gpt2 \
+#     --init_model_path ./production_model_gpt2/no_frozen/run_0/best_model \
+#     --dataset mix \
+#     --batch_size 32 \
+#     --encoder_max_length 992 \
+#     --lr 1e-5 \
+#     --warm_up_ratio 0.05 \
+#     --epochs 10 \
+#     --model_path ./sft_model_gpt2 \
+#     --device cuda:0 \
+#     --wandb
+
+# 使用 Llama3 基座的 AR 模型进行 SFT 训练
+# python train_sft.py \
+#     --seed 42 \
+#     --base_model llama3 \
+#     --init_model_path ./production_model_llama3/no_frozen/run_0/best_model \
+#     --dataset mix \
+#     --batch_size 16 \
+#     --encoder_max_length 992 \
+#     --lr 5e-6 \
+#     --warm_up_ratio 0.05 \
+#     --epochs 8 \
+#     --model_path ./sft_model_llama3 \
+#     --device cuda:0 \
+#     --wandb
+
+# 单任务训练 - IHM (GPT-2)
+# python train_sft.py \
+#     --base_model gpt2 \
+#     --init_model_path ./production_model_gpt2/no_frozen/run_0/best_model \
+#     --dataset ihm \
+#     --batch_size 32 \
+#     --epochs 15 \
+#     --model_path ./sft_model_gpt2_ihm
+
+# 单任务训练 - Phenotyping (Llama3)
+# python train_sft.py \
+#     --base_model llama3 \
+#     --init_model_path ./production_model_llama3/no_frozen/run_0/best_model \
+#     --dataset pheno \
+#     --batch_size 16 \
+#     --epochs 12 \
+#     --model_path ./sft_model_llama3_pheno
+
+# 快速测试 (smoke test) - GPT-2
+# python train_sft.py \
+#     --base_model gpt2 \
+#     --init_model_path ./production_model_gpt2/no_frozen/run_0/best_model \
+#     --dataset ihm \
+#     --batch_size 8 \
+#     --epochs 2 \
+#     --smoke_test
+
+# 快速测试 (smoke test) - Llama3
+# python train_sft.py \
+#     --base_model llama3 \
+#     --init_model_path ./production_model_llama3/no_frozen/run_0/best_model \
+#     --dataset ihm \
+#     --batch_size 4 \
+#     --epochs 2 \
+#     --smoke_test
+
+# 注意事项：
 # 1. --init_model_path 应该指向AR训练后保存的完整InstructTime模型目录
 # 2. 该目录应包含 config.json 和模型权重文件(model.safetensors或pytorch_model.bin)
-# 3. 新的实现会首先尝试加载完整的InstructTime权重，如果失败则回退到GPT2初始化
+# 3. 新的实现会首先尝试加载完整的InstructTime权重，如果失败则回退到基座模型初始化
+# 4. Llama3 模型需要更小的学习率和批次大小以避免显存溢出
+# 5. 确保 --base_model 参数与 AR 训练时使用的基座模型一致

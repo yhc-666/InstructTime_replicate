@@ -152,6 +152,9 @@ if __name__ == "__main__":
         print(train_dl.dataset[0]["input_ids"])
         print(train_dl.dataset[0]["attn_masks"])
         print(train_dl.dataset[0]["label_ids"])
+        # 过滤掉padding token再解码
+        valid_label_ids = train_dl.dataset[0]["label_ids"][train_dl.dataset[0]["label_ids"] != tokenizer.pad_token_id]
+        print("label_ids对应的文字:", tokenizer.decode(valid_label_ids))
     
     else:  # sft mode
         train_dl, val_dl, test_dl = build_sft_dataloaders(
@@ -165,6 +168,10 @@ if __name__ == "__main__":
         print(train_dl.dataset[0]["input_ids"])
         print(train_dl.dataset[0]["attn_masks"])
         print(train_dl.dataset[0]["label_ids"])
+        # 过滤掉-100和padding token再解码
+        label_ids = train_dl.dataset[0]["label_ids"]
+        valid_label_ids = label_ids[(label_ids != -100) & (label_ids != tokenizer.pad_token_id)]
+        print("label_ids对应的文字:", tokenizer.decode(valid_label_ids))
         
         print("\n=== SFT 验证 ValidationDataLoader 内容 ===")
         print("input_ids (仅问题部分):", val_dl.dataset[0]["input_ids"])

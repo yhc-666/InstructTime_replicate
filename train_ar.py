@@ -10,10 +10,10 @@ import torch.nn as nn
 from tqdm import tqdm
 from torch.cuda.amp import autocast, GradScaler
 import transformers
-from transformers import GPT2Config, GPT2LMHeadModel
+from transformers import GPT2Config, GPT2LMHeadModel, LlamaConfig, LlamaForCausalLM
 import wandb
 
-from multimodel import InstructTime, MultiTokenizer
+from multimodel import InstructTime, InstructTimeLlama, MultiTokenizer
 from datamodules import build_ar_dataloaders
 from utils import load_TStokenizer
 
@@ -45,33 +45,34 @@ def setup_logging(run_path: str) -> logging.Logger:
     return logger
 
 
-def initialize_model(device: str, tokenizer: MultiTokenizer, ts_tokenizers, pretrained: str):
-    config = GPT2Config.from_pretrained(pretrained)
-    model = InstructTime(config, ts_tokenizers, text_embedding=len(tokenizer.textTokenizer)).to(device)
-    pretrained_gpt2_model = GPT2LMHeadModel.from_pretrained(pretrained)
-    model.load_state_dict(pretrained_gpt2_model.state_dict(), strict=False)
+def initialize_model(device: str, tokenizer: MultiTokenizer, ts_tokenizers, base_model: str, pretrained: str):
+    """根据 base_model 构建对应的 InstructTime* 模型"""
+    if base_model.lower() == "llama3":
+        # ---------- Llama3 版本 ----------
+        config = LlamaConfig.from_pretrained(pretrained)
+        model = InstructTimeLlama(config, ts_tokenizers, text_embedding=len(tokenizer.textTokenizer)).to(device)
+        pretrained_llama_model = LlamaForCausalLM.from_pretrained(pretrained)
+        model.load_state_dict(pretrained_llama_model.state_dict(), strict=False)
 
-    # ① 由于新增 <BET>, <EET> 两个文本 token，先把 wte (50259→50261)
-    #    也就是 nn.Embedding(vocab_txt, hidden) 扩容。
-    #    新行随机 ~ N(0, config.initializer_range²)；lm_head 会一起扩且仍与 wte 绑权重。
-    model.resize_token_embeddings(len(tokenizer.textTokenizer))
+        model.resize_token_embeddings(len(tokenizer.textTokenizer))
+        current_output = model.get_output_embeddings()
+        new_output = nn.Linear(config.hidden_size, tokenizer.vocabSize_all(), bias=False).to(device)
+        new_output.weight.data[: len(tokenizer.textTokenizer)] = current_output.weight.data
+        model.set_output_embeddings(new_output)
+        model.config.vocab_size = tokenizer.vocabSize_all()
+    else:
+        # ---------- GPT-2 版本 ----------
+        config = GPT2Config.from_pretrained(pretrained)
+        model = InstructTime(config, ts_tokenizers, text_embedding=len(tokenizer.textTokenizer)).to(device)
+        pretrained_gpt2_model = GPT2LMHeadModel.from_pretrained(pretrained)
+        model.load_state_dict(pretrained_gpt2_model.state_dict(), strict=False)
 
-    # ② 保留“扩好后仍 tied 的 lm_head”权重视图，稍后拷贝到自定义更大 lm_head。
-    current_output = model.get_output_embeddings()   # shape (50261, hidden)
-
-    # ③ 新建一个更大的的 lm_head：行 = 文本 50261 + ΣK_i(codebooks)，列 = hidden
-    new_output = nn.Linear(config.n_embd, tokenizer.vocabSize_all(), bias=False).to(device)
-
-    # ④ 继承文本部分权重；codebook 行保持随机初始化
-    new_output.weight.data[: len(tokenizer.textTokenizer)] = current_output.weight.data
-
-    # ⑤ 替换输出投影，解除 wte 与 lm_head 的 weight-tying
-    model.set_output_embeddings(new_output)
-    #    - 输入端 wte 只覆盖 0-50260 的文本 ID
-    #    - 输出端可预测文本 ID + 各 codebook token
-    #    - codebook token 的输入嵌入由 TSEmbedding 负责
-
-    model.config.vocab_size = tokenizer.vocabSize_all()
+        model.resize_token_embeddings(len(tokenizer.textTokenizer))
+        current_output = model.get_output_embeddings()
+        new_output = nn.Linear(config.n_embd, tokenizer.vocabSize_all(), bias=False).to(device)
+        new_output.weight.data[: len(tokenizer.textTokenizer)] = current_output.weight.data
+        model.set_output_embeddings(new_output)
+        model.config.vocab_size = tokenizer.vocabSize_all()
 
     sub_path = "no_frozen"
     return model, sub_path
@@ -152,8 +153,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=2024)
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--model_path", type=str, default="./gptmodel")
-    parser.add_argument("--pretrained_model", type=str, default="gpt2")
+    parser.add_argument("--model_path", type=str, default="./gptmodel", help="path to save AR model")
+    parser.add_argument("--base_model", type=str, default="gpt2", choices=["gpt2", "llama3"], help="base model")
+    parser.add_argument("--pretrained_model", type=str, default="gpt2", help="HF model name or local path")
     parser.add_argument("--dataset", type=str, default="mix", choices=["mix", "ihm", "pheno"])
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--encoder_max_length", type=int, default=230)
@@ -185,7 +187,7 @@ def main():
         val_files = os.path.join(DATA_ROOT, args.dataset, "tokenized_v1_patch64", "val.pkl")
 
     ts_tokenizer = load_TStokenizer(vqvae_path, data_shape=(48, 34), device="cpu")
-    tokenizer = MultiTokenizer([ts_tokenizer])
+    tokenizer = MultiTokenizer([ts_tokenizer], base_model=args.base_model)
 
     train_loader, val_loader = build_ar_dataloaders(train_files, val_files, tokenizer, args.batch_size, args.encoder_max_length)
 
@@ -193,7 +195,7 @@ def main():
         train_loader.dataset.samples = train_loader.dataset.samples[:30]
         val_loader.dataset.samples = val_loader.dataset.samples[:30]
 
-    model, sub_path = initialize_model(args.device, tokenizer, [ts_tokenizer], args.pretrained_model)
+    model, sub_path = initialize_model(args.device, tokenizer, [ts_tokenizer], args.base_model, args.pretrained_model)
     model_subpath = os.path.join(args.model_path, sub_path)
     os.makedirs(model_subpath, exist_ok=True)
     run_path = os.path.join(model_subpath, "run_0")
@@ -228,15 +230,51 @@ def main():
 if __name__ == "__main__":
     main()
 
+
+# 使用 GPT-2 作为基座模型进行 AR 训练
 # python train_ar.py \
 #     --seed 42 \
+#     --base_model gpt2 \
+#     --pretrained_model gpt2 \
 #     --dataset mix \
 #     --batch_size 32 \
 #     --encoder_max_length 1024 \
 #     --lr 1e-5 \
 #     --warm_up_ratio 0.05 \
 #     --epochs 50 \
-#     --pretrained_model gpt2 \
-#     --model_path ./production_model \
+#     --model_path ./production_model_gpt2 \
 #     --device cuda:0 \
 #     --wandb
+
+# 使用 Llama3 作为基座模型进行 AR 训练
+# python train_ar.py \
+#     --seed 42 \
+#     --base_model llama3 \
+#     --pretrained_model meta-llama/Meta-Llama-3-8B \
+#     --dataset mix \
+#     --batch_size 16 \
+#     --encoder_max_length 1024 \
+#     --lr 5e-6 \
+#     --warm_up_ratio 0.05 \
+#     --epochs 30 \
+#     --model_path ./production_model_llama3 \
+#     --device cuda:0 \
+#     --wandb
+
+# 快速测试 (smoke test) - GPT-2
+# python train_ar.py \
+#     --base_model gpt2 \
+#     --pretrained_model gpt2 \
+#     --dataset ihm \
+#     --batch_size 8 \
+#     --epochs 2 \
+#     --smoke_test
+
+# 快速测试 (smoke test) - Llama3
+# python train_ar.py \
+#     --base_model llama3 \
+#     --pretrained_model meta-llama/Meta-Llama-3-8B \
+#     --dataset ihm \
+#     --batch_size 4 \
+#     --epochs 2 \
+#     --smoke_test

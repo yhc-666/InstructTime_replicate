@@ -171,13 +171,16 @@ class _BaseDataset(Dataset):
         masks = masks[: self.max_length]
 
         pad_len = self.max_length - len(ids)
-        if self.mode == "train":
-            ids = ids + [self.tokenizer.pad_token_id] * pad_len
-            masks = masks + [0] * pad_len
-        else:
-            ids = [self.tokenizer.pad_token_id] * pad_len + ids
-            masks = [0] * pad_len + masks
+        ids = ids + [self.tokenizer.pad_token_id] * pad_len
+        masks = masks + [0] * pad_len
         return ids, masks
+    
+    def _padding_labels(self, labels: List[int]):
+        """Pad label sequences to ``self.max_length`` using -100."""
+        labels = labels[: self.max_length]
+        pad_len = self.max_length - len(labels)
+        labels = labels + [-100] * pad_len
+        return labels
 
 
 class ARDataset(_BaseDataset):
@@ -196,7 +199,7 @@ class ARDataset(_BaseDataset):
 
         attn_masks = [1] * len(input_ids)
         input_ids, attn_masks = self._padding(input_ids, attn_masks)
-        labels, _ = self._padding(labels, attn_masks)
+        labels = self._padding_labels(labels)
 
         return {
             "input_ids": torch.LongTensor(input_ids),
@@ -220,7 +223,16 @@ class SFTDataset(_BaseDataset):
             labels = [-100] * len(base_ids) + label_ids + [eos_id]
             attn_masks = [1] * len(input_ids)
             input_ids, attn_masks = self._padding(input_ids, attn_masks)
-            labels, _ = self._padding(labels, attn_masks)
+            # 对labels进行padding，使用-100而不是pad_token_id
+            labels = labels[: self.max_length]
+            pad_len = self.max_length - len(labels)
+            labels = labels + [-100] * pad_len
+            """
+            SFT数据格式示例
+            input_ids = [问题tokens] + [答案tokens] + [EOS] + [PAD, PAD, PAD]
+            labels    = [-100, -100] + [答案tokens] + [EOS] + [-100, -100, -100]
+                        ↑ 问题部分不参与损失    ↑ 答案部分参与损失  ↑ padding不参与损失
+            """
             return {
                 "input_ids": torch.LongTensor(input_ids),
                 "attn_masks": torch.FloatTensor(attn_masks),

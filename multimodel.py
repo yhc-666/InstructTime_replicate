@@ -15,6 +15,8 @@ import copy
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
+from transformers import LlamaForCausalLM, LlamaTokenizer, LlamaConfig
+from transformers import AutoTokenizer 
 
 local_model_path = "./gpt2-model"
 
@@ -325,21 +327,35 @@ class MultiTokenizer:
     作用: 
         提供统一的编码接口，可以处理文本或时间序列输入
     """
-    def __init__(self, ecgTokenizers) -> None:
+    def __init__(self, ecgTokenizers, base_model: str = "gpt2") -> None:
         """
         功能: 初始化MultiTokenizer
         输入:
             - ecgTokenizers: 时间序列tokenizer列表
+            - base_model: 基础模型名称，默认为"gpt2"
         """
-        self.textTokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+        if base_model.lower() == "llama3":
+            # self.textTokenizer = LlamaTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B")
+            self.textTokenizer = AutoTokenizer.from_pretrained(
+                "meta-llama/Meta-Llama-3-8B",
+                use_fast=True,              # 强制用 rust backend
+                trust_remote_code=False,
+            )
+        else:   
+            # default gpt2
+            self.textTokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+        
         new_special_tokens = ["<BET>", "<EET>"]
         self.textTokenizer.add_special_tokens({"additional_special_tokens": new_special_tokens})
+        
+        # 设置PAD token为EOS token（GPT2的标准做法）
+        self.textTokenizer.pad_token = self.textTokenizer.eos_token
+        
         self.text_vocab_size = len(self.textTokenizer)
-
         self.ecgTokenizers = ecgTokenizers
 
-        self.pad_token_id = self.textTokenizer.eos_token_id
-        self.eos_token_id = self.textTokenizer.eos_token_id
+        self.pad_token_id = self.textTokenizer.pad_token_id  # 50256
+        self.eos_token_id = self.textTokenizer.eos_token_id  # 50256
 
         self.offsets = self._calculate_offsets()
 
@@ -423,3 +439,145 @@ class MultiTokenizer:
             return ""
             
         return self.textTokenizer.decode(text_tokens, skip_special_tokens=skip_special_tokens)
+
+# ==================== 新增: Llama 基座版本 ====================
+
+class InstructTimeLlama(LlamaForCausalLM):
+    """
+    与 InstructTime (GPT-2 版) 相同的多模态逻辑，但基座替换为 Llama。
+    仅修改父类、嵌入接口以及 config 中的隐藏维度字段名称。
+    """
+
+    def __init__(self, config: LlamaConfig, ecgTokenizers, text_embedding=128256):
+        """text_embedding 给个较大的默认值（Llama3 vocab≈128k）"""
+        super().__init__(config)
+
+        self.ecgTokenizers = ecgTokenizers
+
+        # ===== 共用时间序列 Embedding 与投影层 =====
+        embed_vector = torch.empty(0, self.ecgTokenizers[0].hidden_dim)
+        for tokenizer in self.ecgTokenizers:
+            tokenizer_embed_vector = copy.deepcopy(tokenizer.quantize.embed).transpose(-1, 0)
+            embed_vector = torch.cat([embed_vector, tokenizer_embed_vector], dim=0)
+        self.embed_layer = nn.Embedding.from_pretrained(embed_vector)
+
+        self.text_embedding = text_embedding
+        # LlamaConfig 的隐藏维度字段为 hidden_size
+        self.embed = config.hidden_size
+
+        # pad_token 尚未设置时与 eos_token 保持一致
+        self.config.pad_token_id = (
+            self.config.eos_token_id if self.config.pad_token_id is None else self.config.pad_token_id
+        )
+
+        # domain-wise 投影层
+        self.projection_layers = nn.ModuleList()
+        for _ in ecgTokenizers:
+            mlp = MLP(self.ecgTokenizers[0].hidden_dim, [64, 128, 256, 512], self.embed)
+            mlp.apply(self.init_weights_kaiming)
+            self.projection_layers.append(mlp)
+
+        # 计算 offsets
+        self.offsets = [self.text_embedding]
+        for tokenizer in self.ecgTokenizers:
+            self.offsets.append(self.offsets[-1] + tokenizer.n_embed)
+
+    @staticmethod
+    def init_weights_kaiming(m):
+        if isinstance(m, nn.Linear):
+            nn.init.kaiming_normal_(m.weight, nonlinearity="leaky_relu")
+            m.bias.data.fill_(0.01)
+
+    def forward(self, *args, **kwargs):
+        input_ids = kwargs["input_ids"]
+
+        text_mask = torch.lt(input_ids, self.text_embedding)
+        ecg_mask = ~text_mask
+
+        # ---------------- 文本 token ----------------
+        text_ids = input_ids.clone()
+        text_ids[ecg_mask] = self.config.pad_token_id
+
+        # llama 的嵌入层接口如下
+        text_embeddings = self.get_input_embeddings()(text_ids)
+        text_embeddings.mul_(text_mask.float().unsqueeze(-1))
+
+        # ---------------- 时间序列 token ----------------
+        masked_ids = input_ids.clone()
+        masked_ids[text_mask] = 0
+        masked_ids[ecg_mask] -= self.text_embedding
+
+        ecg_embeddings = torch.zeros_like(text_embeddings)
+        for i, _ in enumerate(self.ecgTokenizers):
+            tokenizer_mask = (input_ids >= self.offsets[i]) & (input_ids < self.offsets[i + 1])
+            tokenizer_ids = input_ids.clone()
+            tokenizer_ids[~tokenizer_mask] = 0
+            tokenizer_ids[tokenizer_mask] -= self.text_embedding
+
+            tokenizer_embeddings = self.embed_layer(tokenizer_ids)
+            tokenizer_embeddings = self.projection_layers[i](tokenizer_embeddings)
+            tokenizer_embeddings.mul_(tokenizer_mask.float().unsqueeze(-1))
+            ecg_embeddings.add_(tokenizer_embeddings)
+
+        kwargs["input_ids"] = None
+        kwargs["inputs_embeds"] = ecg_embeddings + text_embeddings
+
+        outputs = super().forward(*args, **kwargs)
+        return outputs
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_path,
+        ecgTokenizers,
+        text_embedding=128256,
+        device="cpu",
+        **kwargs,
+    ):
+        """加载保存的 InstructTimeLlama 权重（与 GPT2 版逻辑保持一致）"""
+        import os
+        # 1. 读取 LlamaConfig
+        config = LlamaConfig.from_pretrained(model_path)
+
+        # 2. 构造 MultiTokenizer 以获取词表大小
+        multi_tokenizer = MultiTokenizer(ecgTokenizers, base_model="llama3")
+
+        # 3. 初始化模型
+        model = cls(config, ecgTokenizers,
+                    text_embedding=len(multi_tokenizer.textTokenizer))
+
+        # 4. 扩容 & 替换输出头
+        model.resize_token_embeddings(len(multi_tokenizer.textTokenizer))
+        current_output = model.get_output_embeddings()
+        new_output = nn.Linear(config.hidden_size, multi_tokenizer.vocabSize_all(), bias=False).to(device)
+        new_output.weight.data[: len(multi_tokenizer.textTokenizer)] = current_output.weight.data
+        model.set_output_embeddings(new_output)
+        model.config.vocab_size = multi_tokenizer.vocabSize_all()
+
+        # 5. 加载权重文件（支持 safetensors / pytorch）
+        candidate_paths = [
+            os.path.join(model_path, "model.safetensors"),
+            os.path.join(model_path, "pytorch_model.bin"),
+            os.path.join(model_path, "model.bin"),
+        ]
+
+        state_dict = None
+        for p in candidate_paths:
+            if os.path.exists(p):
+                if p.endswith(".safetensors"):
+                    try:
+                        from safetensors.torch import load_file
+                        state_dict = load_file(p, device=device)
+                    except ImportError:
+                        continue
+                else:
+                    state_dict = torch.load(p, map_location=device)
+                break
+
+        if state_dict is None:
+            raise FileNotFoundError(f"未找到模型权重文件, 尝试路径: {candidate_paths}")
+
+        model.load_state_dict(state_dict, strict=False)
+
+        model.to(device)
+        return model

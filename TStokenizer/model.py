@@ -226,7 +226,7 @@ class Quantize(nn.Module):
     beta     : commitment 损失权重 (典型 0.25)
     """
 
-    def __init__(self, dim, n_embed, decay=0.99, eps=1e-5, beta=0.25):
+    def __init__(self, dim, n_embed, decay=0.99, eps=1e-5, beta=0.45):
         super().__init__()
 
         # --------------------------- 常量保存 ----------------------------

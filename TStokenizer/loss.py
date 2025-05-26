@@ -9,7 +9,7 @@ class MSE:
     功能: 计算VQVAE模型的损失，包括重构损失和latent损失
     该类组合了重构损失(MSE)和codebook承诺损失(commitment loss)
     """
-    def __init__(self, model, latent_loss_weight=0.25):
+    def __init__(self, model, latent_loss_weight=0.35):
         """
         功能: 初始化MSE损失计算器
         输入:

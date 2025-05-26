@@ -61,31 +61,36 @@ class ICUTimeSeriesDataset(Dataset):
 
 def train_icu_codebook(
     data_root: str,
-    save_dir: str = "./ecg_tokenizer",
-    *,                            
+    save_dir: str = "./icu_tokenizer",
+    *,
     hidden_dim: int = 64,
     n_embed: int = 256,
     wave_length: int = 4,
     block_num: int = 4,
-    max_len: int = 48,            # 数据集最大时间步
-    ts_channels: int = 34,       # 时间序列通道数
+    max_len: int = 48,
+    ts_channels: int = 34,
     epochs: int = 30,
-    lr: float = 1e-3,
-    batch_size: int = 64,
+    lr: float = 2e-4,
+    batch_size: int = 128,
     device: str = "cuda",
     smoke_test: bool = False,
-    use_wandb: bool = False
+    use_wandb: bool = False,
+    patience: int = 10,
+    lr_decay_factor: float = 0.5,
+    lr_decay_patience: int = 5,
+    weight_decay: float = 1e-5,
 ):
 
-    """Train VQ-VAE codebook on IHM+PHE datasets."""
-
+    # -------- datasets --------
     train_set = ICUTimeSeriesDataset(data_root, "train",
                                      max_len=max_len, smoke_test=smoke_test)
     val_set   = ICUTimeSeriesDataset(data_root, "val",
                                      max_len=max_len, smoke_test=smoke_test)
+
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
     val_loader   = DataLoader(val_set,   batch_size=batch_size)
 
+    # -------- model / opt --------
     model = TStokenizer(
         data_shape=(max_len, ts_channels),
         hidden_dim=hidden_dim,
@@ -94,52 +99,65 @@ def train_icu_codebook(
         wave_length=wave_length
     ).to(device)
 
-    optim = torch.optim.Adam(model.parameters(), lr=lr)
+    optim = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optim, mode="min", factor=lr_decay_factor,
+        patience=lr_decay_patience, verbose=True)
 
-    hyper = dict(
-        data_shape=(max_len, ts_channels),
-        hidden_dim=hidden_dim,
-        n_embed=n_embed,
-        block_num=block_num,
-        wave_length=wave_length
-    )
-    
     if use_wandb:
-        wandb.init(project="icu-vq-codebook", config=hyper | dict(
-        epochs=epochs, lr=lr, batch_size=batch_size,
-        device=device, smoke_test=smoke_test))
+        wandb.init(project="icu-vq-codebook",
+                   config=dict(hidden_dim=hidden_dim, n_embed=n_embed,
+                               wave_length=wave_length, lr=lr, batch_size=batch_size,
+                               epochs=epochs))
         wandb.watch(model)
 
-    for epoch in range(epochs):
-        # ───────────── train ──────────────
+    # -------- early-stop vars --------
+    best_val = float("inf")
+    best_state = None
+    stale = 0
+
+    # ===== main loop =====
+    for ep in range(1, epochs + 1):
+
+        # ----- train -----
         model.train()
-        loss_sum = recon_sum = vq_sum = token_sum = 0.0
+        step_token_sum = step_patch_sum = 0.0
+        recon_acc = vq_acc = 0.0
         used_ids = set()
+
         for seqs, mask, _ in train_loader:
             seqs, mask = seqs.to(device), mask.to(device)
             recon, diff, ids = model(seqs, mask=mask)
 
+            # losses
             recon_loss = ((recon - seqs) ** 2 * mask).sum() / mask.sum()
             loss = recon_loss + diff
-            optim.zero_grad(); loss.backward(); optim.step()
 
-            # 统计
-            step_tokens = mask.sum().item()          # 有效时间步
-            token_sum  += step_tokens
-            loss_sum   += loss.item()   * step_tokens
-            recon_sum  += recon_loss.item() * step_tokens
-            vq_sum     += diff.item()   * step_tokens
+            optim.zero_grad()
+            loss.backward()
+            optim.step()
+
+            # stats
+            tok = mask.sum().item()
+            pat = mask.view(mask.size(0), -1, wave_length).any(-1).sum().item()
+
+            step_token_sum += tok
+            step_patch_sum += pat
+            recon_acc      += recon_loss.item() * tok
+            vq_acc         += diff.item() * pat
             used_ids.update(ids.flatten().tolist())
 
-        avg_train_loss  = loss_sum  / token_sum
-        avg_train_recon = recon_sum / token_sum
-        avg_train_vq    = vq_sum    / token_sum
-        code_usage_train = len(used_ids) / model.n_embed   # 0-1
+        train_recon = recon_acc / step_token_sum
+        train_vq    = vq_acc    / step_patch_sum
+        train_loss  = train_recon + train_vq
+        code_use_tr = len(used_ids) / n_embed
 
-        # ───────────── valid ─────────────
+        # ----- valid -----
         model.eval()
-        loss_sum = recon_sum = vq_sum = token_sum = 0.0
+        step_token_sum = step_patch_sum = 0.0
+        recon_acc = vq_acc = 0.0
         used_ids.clear()
+
         with torch.no_grad():
             for seqs, mask, _ in val_loader:
                 seqs, mask = seqs.to(device), mask.to(device)
@@ -147,47 +165,59 @@ def train_icu_codebook(
 
                 recon_loss = ((recon - seqs) ** 2 * mask).sum() / mask.sum()
 
-                step_tokens = mask.sum().item()
-                token_sum  += step_tokens
-                loss_sum   += (recon_loss + diff).item() * step_tokens
-                recon_sum  += recon_loss.item()          * step_tokens
-                vq_sum     += diff.item()                * step_tokens
+                tok = mask.sum().item()
+                pat = mask.view(mask.size(0), -1, wave_length).any(-1).sum().item()
+
+                step_token_sum += tok
+                step_patch_sum += pat
+                recon_acc      += recon_loss.item() * tok
+                vq_acc         += diff.item() * pat
                 used_ids.update(ids.flatten().tolist())
 
-        avg_val_loss  = loss_sum  / token_sum
-        avg_val_recon = recon_sum / token_sum
-        avg_val_vq    = vq_sum    / token_sum
-        code_usage_val = len(used_ids) / model.n_embed
+        val_recon = recon_acc / step_token_sum
+        val_vq    = vq_acc    / step_patch_sum
+        val_loss  = val_recon + val_vq
+        code_use_val = len(used_ids) / n_embed
 
-        print(f"Epoch {epoch+1}/{epochs}  "
-              f"Train {avg_train_loss:.4f}  Val {avg_val_loss:.4f}  "
-              f"CodeUsed {code_usage_train:.2%}")
+        # -- scheduler / early-stop --
+        scheduler.step(val_loss)
+        if val_loss < best_val:
+            best_val = val_loss
+            best_state = model.state_dict()
+            stale = 0
+            flag = "✓"
+        else:
+            stale += 1
+            flag = " "
+
+        print(f"{flag} Epoch {ep}/{epochs}  "
+              f"Train {train_loss:.3f}  Val {val_loss:.3f}  "
+              f"CodeUse {code_use_tr:.1%}  LR {optim.param_groups[0]['lr']:.1e}  "
+              f"Pat {stale}/{patience}")
 
         if use_wandb:
-            wandb.log({
-                "epoch": epoch + 1,
-                "train_loss":  avg_train_loss,
-                "val_loss":    avg_val_loss,
-                "train_recon": avg_train_recon,
-                "val_recon":   avg_val_recon,
-                "train_vq":    avg_train_vq,
-                "val_vq":      avg_val_vq,
-                "code_usage_train": code_usage_train,
-                "code_usage_val":   code_usage_val,
-            })
-    
-    # --------(1) 创建保存目录--------
+            wandb.log(dict(epoch=ep,
+                           train_loss=train_loss, val_loss=val_loss,
+                           train_recon=train_recon, val_recon=val_recon,
+                           train_vq=train_vq,   val_vq=val_vq,
+                           code_usage_train=code_use_tr, code_usage_val=code_use_val,
+                           lr=optim.param_groups[0]['lr']))
+
+        if stale >= patience:
+            print(f"Early-stop at epoch {ep}")
+            break
+
+    # -------- save --------
     os.makedirs(save_dir, exist_ok=True)
-
-    # --------(2) 把所有超参写入 args.json--------
-    with open(os.path.join(save_dir, "args.json"), "w") as f:
-        json.dump(hyper, f, indent=2)
-
-    # --------(3) 保存纯 state-dict--------
-    torch.save(model.state_dict(), os.path.join(save_dir, "model.pkl"))
+    torch.save(best_state or model.state_dict(),
+               os.path.join(save_dir, "model.pkl"))
+    with open(os.path.join(save_dir, "args.json"), "w") as fp:
+        json.dump(hyper := dict(hidden_dim=hidden_dim, n_embed=n_embed,
+                                wave_length=wave_length, block_num=block_num), fp, indent=2)
 
     if use_wandb:
         wandb.finish()
+
 
 
 if __name__ == "__main__":
@@ -203,18 +233,28 @@ if __name__ == "__main__":
     # 训练超参（可选）
     parser.add_argument("--hidden_dim",    type=int, default=64)
     parser.add_argument("--n_embed",    type=int, default=256)
-    parser.add_argument("--wave_length",type=int, default=4)
+    parser.add_argument("--wave_length",type=int, default=2)
     parser.add_argument("--block_num",  type=int, default=4)
     parser.add_argument("--max_len",    type=int, default=48)
     parser.add_argument("--ts_channels",type=int, default=34)
-    parser.add_argument("--epochs",     type=int, default=30)
-    parser.add_argument("--lr",         type=float, default=1e-3)
-    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--epochs",     type=int, default=50)
+    parser.add_argument("--lr",         type=float, default=1e-5)
+    parser.add_argument("--batch_size", type=int, default=128)
 
     # 运行环境
     parser.add_argument("--device",     type=str, default="cuda")
     parser.add_argument("--smoke_test", action="store_true")
     parser.add_argument("--use_wandb",  action="store_true")
+    
+    # 新增正则化参数
+    parser.add_argument("--patience", type=int, default=10,
+                        help="Early stopping patience")
+    parser.add_argument("--lr_decay_factor", type=float, default=0.5,
+                        help="Learning rate decay factor")
+    parser.add_argument("--lr_decay_patience", type=int, default=5,
+                        help="Learning rate decay patience")
+    parser.add_argument("--weight_decay", type=float, default=1e-5,
+                        help="Weight decay for regularization")
 
     args = parser.parse_args()
 
@@ -233,6 +273,10 @@ if __name__ == "__main__":
         device      = args.device,
         smoke_test  = args.smoke_test,
         use_wandb   = args.use_wandb,
+        patience    = args.patience,
+        lr_decay_factor = args.lr_decay_factor,
+        lr_decay_patience = args.lr_decay_patience,
+        weight_decay = args.weight_decay,
     )
 
 
@@ -240,10 +284,44 @@ if __name__ == "__main__":
 # /home/ubuntu/Virginia/output_mimic3
 # /home/ubuntu/hcy50662/output_mimic3
 
+# 原始命令（可能导致过拟合）
 # python train_icu_codebook.py \
-#     --data_root   /Users/haochengyang/Desktop/research/CTPD/MMMSPG-014C/EHR_dataset/mimiciii_benchmark/output_mimic3 \
+#     --data_root   /home/ubuntu/hcy50662/output_mimic3 \
 #     --smoke_test \
 #     --epochs      1 \
+#     --use_wandb
+
+# 改进的训练命令（解决过拟合问题）
+# 1. 使用完整数据集训练（移除 --smoke_test）
+# python train_icu_codebook.py \
+#     --data_root   /home/ubuntu/hcy50662/output_mimic3 \
+#     --use_wandb
+
+# 2. 如果必须使用smoke_test，增加正则化
+# python train_icu_codebook.py \
+#     --data_root   /home/ubuntu/hcy50662/output_mimic3 \
+#     --smoke_test \
+#     --epochs      30 \
+#     --lr          1e-4 \
+#     --batch_size  8 \
+#     --patience    10 \
+#     --lr_decay_factor 0.5 \
+#     --lr_decay_patience 5 \
+#     --weight_decay 1e-3 \
+#     --use_wandb
+
+# 3. 更保守的训练设置
+# python train_icu_codebook.py \
+#     --data_root   /home/ubuntu/hcy50662/output_mimic3 \
+#     --epochs      100 \
+#     --lr          1e-4 \
+#     --batch_size  16 \
+#     --patience    20 \
+#     --lr_decay_factor 0.8 \
+#     --lr_decay_patience 10 \
+#     --weight_decay 5e-4 \
+#     --n_embed     512 \
+#     --hidden_dim  128 \
 #     --use_wandb
 
 

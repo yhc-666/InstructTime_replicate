@@ -6,7 +6,7 @@ TStokenizer/Vq_weight
 
 ts_tokenized_datasets
 
-wandb
+wandb/
 
 gptmodel
 
