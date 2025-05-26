@@ -48,17 +48,39 @@ def setup_logging(run_path: str) -> logging.Logger:
 
 
 def initialize_model(device: str, tokenizer: MultiTokenizer, ts_tokenizers, weight_path: str):
-    config = GPT2Config.from_pretrained(weight_path)
-    model = InstructTime(config, ts_tokenizers, text_embedding=len(tokenizer.textTokenizer)).to(device)
-    pretrained_gpt2_model = GPT2LMHeadModel.from_pretrained(weight_path)
-    model.load_state_dict(pretrained_gpt2_model.state_dict(), strict=False)
+    """
+    加载完整的AR训练后的InstructTime模型权重
+    Args:
+        weight_path: AR训练后保存的InstructTime模型路径 (包含config.json和模型权重文件:model.safetensors或pytorch_model.bin)
+    """
+    try:
+        # 尝试使用自定义的from_pretrained方法加载完整的InstructTime模型
+        model = InstructTime.from_pretrained(
+            model_path=weight_path,
+            ecgTokenizers=ts_tokenizers,
+            text_embedding=len(tokenizer.textTokenizer),
+            device=device
+        )
+        print("Successfully loaded complete InstructTime model using from_pretrained method")
+        
+    except (FileNotFoundError, Exception) as e:
+        print(f"Failed to load complete InstructTime model: {e}")
+        print("Falling back to GPT2 initialization...")
+        
+        # 回退到原来的方法：只加载GPT2部分并重新初始化其他组件
+        config = GPT2Config.from_pretrained(weight_path)
+        model = InstructTime(config, ts_tokenizers, text_embedding=len(tokenizer.textTokenizer)).to(device)
+        
+        pretrained_gpt2_model = GPT2LMHeadModel.from_pretrained(weight_path)
+        model.load_state_dict(pretrained_gpt2_model.state_dict(), strict=False)
 
-    model.resize_token_embeddings(len(tokenizer.textTokenizer))
-    current_output = model.get_output_embeddings()
-    new_output = nn.Linear(config.n_embd, tokenizer.vocabSize_all(), bias=False).to(device)
-    new_output.weight.data[: len(tokenizer.textTokenizer)] = current_output.weight.data
-    model.set_output_embeddings(new_output)
-    model.config.vocab_size = tokenizer.vocabSize_all()
+        # 重新设置扩展的embedding和lm_head
+        model.resize_token_embeddings(len(tokenizer.textTokenizer))
+        current_output = model.get_output_embeddings()
+        new_output = nn.Linear(config.n_embd, tokenizer.vocabSize_all(), bias=False).to(device)
+        new_output.weight.data[: len(tokenizer.textTokenizer)] = current_output.weight.data
+        model.set_output_embeddings(new_output)
+        model.config.vocab_size = tokenizer.vocabSize_all()
 
     sub_path = "no_frozen"
     return model, sub_path
@@ -89,26 +111,31 @@ def validate_sft(model, loader, device, tokenizer, dataset, logger):
                 num_beams=1,
             )
 
-            for g, l in zip(gen_ids, labels):
-                text = tokenizer.decode(g.tolist(), skip_special_tokens=True)
+            for g, l, input_id in zip(gen_ids, labels, input_ids):
+                # 获取完整生成的文本
+                full_text = tokenizer.decode(g.tolist(), skip_special_tokens=True)
+                # 获取输入文本
+                input_text = tokenizer.decode(input_id.tolist(), skip_special_tokens=True)
+                # 提取模型回复部分（去掉输入部分）
+                if full_text.startswith(input_text):
+                    response_text = full_text[len(input_text):].strip()
+                else:
+                    response_text = full_text
+                
                 if l.dim() == 0 or l.numel() == 1:
-                    pred_ihm.append(text)
+                    pred_ihm.append(response_text)
                     gold_ihm.append(int(l.item()))
                 else:
-                    pred_pheno.append(text)
+                    pred_pheno.append(response_text)
                     gold_pheno.append(l.numpy().tolist())
-
+    print('last response:', response_text)
     results = {}
     if pred_ihm:
         results["ihm"] = compute_metrics(pred_ihm, gold_ihm, "ihm", IHM_LABEL_MAP)
-        logger.info(
-            f"IHM Val ACC: {results['ihm']['acc']:.4f} | F1: {results['ihm']['f1']:.4f}"
-        )
+        print(f"IHM Val ACC: {results['ihm']['acc']:.4f} | F1: {results['ihm']['f1']:.4f}")
     if pred_pheno:
         results["pheno"] = compute_metrics(pred_pheno, gold_pheno, "pheno", PHENO_LABEL_MAP)
-        logger.info(
-            f"Pheno Val ACC: {results['pheno']['acc']:.4f} | F1: {results['pheno']['f1']:.4f}"
-        )
+        print(f"Pheno Val ACC: {results['pheno']['acc']:.4f} | F1: {results['pheno']['f1']:.4f}")
     return results
 
 
@@ -164,11 +191,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=2024)
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--model_path", type=str, default="./gptmodel")
+    parser.add_argument("--model_path", type=str, default="./sft_model", help="path to save SFT model")
     parser.add_argument("--init_model_path", type=str, required=True, help="path to pretrained AR model")
-    parser.add_argument("--dataset", type=str, default="mix", choices=["mix", "ihm", "pheno"])
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--encoder_max_length", type=int, default=230)
+    parser.add_argument("--dataset", type=str, default="pheno", choices=["mix", "ihm", "pheno"])
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--encoder_max_length", type=int, default=992)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--warm_up_ratio", type=float, default=0.05)
     parser.add_argument("--epochs", type=int, default=10)
@@ -244,3 +271,12 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# 使用完整InstructTime模型权重的示例：
+# python train_sft.py --init_model_path production_model/no_frozen/run_0/best_model --smoke_test
+
+# 注意：
+# 1. --init_model_path 应该指向AR训练后保存的完整InstructTime模型目录
+# 2. 该目录应包含 config.json 和模型权重文件(model.safetensors或pytorch_model.bin)
+# 3. 新的实现会首先尝试加载完整的InstructTime权重，如果失败则回退到GPT2初始化

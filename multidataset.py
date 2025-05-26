@@ -126,7 +126,14 @@ class _BaseDataset(Dataset):
     def _build_prompt(self, sample: dict) -> tuple[List[int], str]:
         """Construct base input ids and label string from a raw sample."""
 
-        notes_text = "\n".join(sample["notes"])
+        # notes_text = "\n".join(sample["notes"])
+        # 只取最后一个note的后一半
+        if sample["notes"]:
+            last_note = sample["notes"][-1]
+            half_length = len(last_note) // 2
+            notes_text = last_note[half_length:]
+        else:
+            notes_text = ""
 
         if sample["task"] == "ihm":
             instruction = (

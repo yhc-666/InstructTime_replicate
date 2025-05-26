@@ -56,6 +56,7 @@ class MLP(nn.Module):
                 x = F.gelu(x)
         return x
     
+    
 class InstructTime(GPT2LMHeadModel):
     """
     功能: InstructTime主模型, 继承自GPT2LMHeadModel, 增加时间序列处理能力
@@ -223,6 +224,96 @@ class InstructTime(GPT2LMHeadModel):
         outputs = super().forward(*args, **kwargs)
         return outputs    
 
+    @classmethod
+    def from_pretrained(cls, model_path, ecgTokenizers, text_embedding=50258, device="cpu", **kwargs):
+        """
+        功能: 从保存的模型路径加载完整的InstructTime模型
+        输入:
+            - model_path: 保存模型的路径，包含config.json和模型权重文件(pytorch_model.bin或model.safetensors)
+            - ecgTokenizers: 时间序列tokenizer列表
+            - text_embedding: 文本词表大小
+            - device: 设备
+        输出:
+            - 加载完整权重的InstructTime模型实例
+        """
+        import os
+        from transformers import GPT2Config
+        
+        # 加载配置
+        config = GPT2Config.from_pretrained(model_path)
+        
+        # 创建模型实例
+        model = cls(config, ecgTokenizers, text_embedding)
+
+        # 创建MultiTokenizer实例以获取正确的词表大小
+        multi_tokenizer = MultiTokenizer(ecgTokenizers)
+
+        # ① 由于新增 <BET>, <EET> 两个文本 token，先把 wte (50259→50261)
+        #    也就是 nn.Embedding(vocab_txt, hidden) 扩容。
+        #    新行随机 ~ N(0, config.initializer_range²)；lm_head 会一起扩且仍与 wte 绑权重。
+        model.resize_token_embeddings(len(multi_tokenizer.textTokenizer))
+
+        # ② 保留"扩好后仍 tied 的 lm_head"权重视图，稍后拷贝到自定义更大 lm_head。
+        current_output = model.get_output_embeddings()   # shape (50261, hidden)
+
+        # ③ 新建一个更大的的 lm_head：行 = 文本 50261 + ΣK_i(codebooks)，列 = hidden
+        new_output = nn.Linear(config.n_embd, multi_tokenizer.vocabSize_all(), bias=False).to(device)
+
+        # ④ 继承文本部分权重；codebook 行保持随机初始化
+        new_output.weight.data[: len(multi_tokenizer.textTokenizer)] = current_output.weight.data
+
+        # ⑤ 替换输出投影，解除 wte 与 lm_head 的 weight-tying
+        model.set_output_embeddings(new_output)
+        #    - 输入端 wte 只覆盖 0-50260 的文本 ID
+        #    - 输出端可预测文本 ID + 各 codebook token
+        #    - codebook token 的输入嵌入由 TSEmbedding 负责
+
+        model.config.vocab_size = multi_tokenizer.vocabSize_all()
+        
+        # 尝试加载模型权重，支持多种格式
+        model_weights_paths = [
+            os.path.join(model_path, "model.safetensors"),
+            os.path.join(model_path, "pytorch_model.bin"),
+            os.path.join(model_path, "model.bin")
+        ]
+        
+        state_dict = None
+        loaded_path = None
+        
+        for weights_path in model_weights_paths:
+            if os.path.exists(weights_path):
+                loaded_path = weights_path
+                if weights_path.endswith('.safetensors'):
+                    try:
+                        from safetensors.torch import load_file
+                        state_dict = load_file(weights_path, device=device)
+                        print(f"Loading model weights from safetensors: {weights_path}")
+                    except ImportError:
+                        print("Warning: safetensors not installed, trying to load as pytorch format")
+                        continue
+                else:
+                    state_dict = torch.load(weights_path, map_location=device)
+                    print(f"Loading model weights from pytorch format: {weights_path}")
+                break
+        
+        if state_dict is None:
+            raise FileNotFoundError(f"Model weights file not found. Tried: {model_weights_paths}")
+        
+        # 加载权重到模型
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+        
+        if missing_keys:
+            print(f"Warning: Missing keys when loading InstructTime model: {missing_keys}")
+        if unexpected_keys:
+            print(f"Warning: Unexpected keys when loading InstructTime model: {unexpected_keys}")
+            
+        print(f"Successfully loaded complete InstructTime model from {loaded_path}")
+            
+        model.to(device)
+        return model
+
+
+
 class MultiTokenizer:
     """
     功能: 多模态tokenizer封装类, 整合文本tokenizer和多个时间序列tokenizer
@@ -312,6 +403,23 @@ class MultiTokenizer:
         输出:
             - 解码后的文本字符串
         说明:
-            目前只支持解码文本token，时间序列token将被替换为pad token
-        """        
-        return self.textTokenizer.decode(input, skip_special_tokens=skip_special_tokens)
+            只解码文本token，时间序列token将被过滤掉
+        """
+        # 确保input是列表格式
+        if isinstance(input, torch.Tensor):
+            input = input.tolist()
+        elif not isinstance(input, list):
+            input = [input]
+        
+        # 过滤掉时间序列token，只保留文本token
+        text_tokens = []
+        for token_id in input:
+            if token_id < self.text_vocab_size:
+                text_tokens.append(token_id)
+            # 时间序列token被跳过，不添加到text_tokens中
+        
+        # 如果没有文本token，返回空字符串
+        if not text_tokens:
+            return ""
+            
+        return self.textTokenizer.decode(text_tokens, skip_special_tokens=skip_special_tokens)
