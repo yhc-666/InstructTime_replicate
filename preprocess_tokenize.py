@@ -165,9 +165,15 @@ if __name__ == "__main__":
 
 
 # /Users/haochengyang/Desktop/research/CTPD/MMMSPG-014C/EHR_dataset/mimiciii_benchmark/output_mimic3
+# /home/ubuntu/hcy50662/output_mimic3
 
 # python preprocess_tokenize.py \
-#    --data_root   /Users/haochengyang/Desktop/research/CTPD/MMMSPG-014C/EHR_dataset/mimiciii_benchmark/output_mimic3 \
+#    --data_root   /home/ubuntu/hcy50662/output_mimic3 \
 #    --tokenizer   TStokenizer/Vq_weight \
-#    --device      cpu \
+#    --device      cuda \
 #    --smoke_test
+
+# python preprocess_tokenize.py \
+#    --data_root   /home/ubuntu/hcy50662/output_mimic3 \
+#    --tokenizer   TStokenizer/Vq_weight \
+#    --device      cuda

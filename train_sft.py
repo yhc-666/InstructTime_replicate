@@ -12,6 +12,7 @@ from torch.cuda.amp import autocast, GradScaler
 import transformers
 from transformers import GPT2Config, GPT2LMHeadModel, LlamaConfig, LlamaForCausalLM
 import wandb
+from peft import LoraConfig, get_peft_model, TaskType, PeftModel
 
 from multimodel import InstructTime, InstructTimeLlama, MultiTokenizer
 from datamodules import build_sft_dataloaders
@@ -56,19 +57,35 @@ def initialize_model(device: str, tokenizer: MultiTokenizer, ts_tokenizers, weig
     try:
         # 根据基座类型调用对应的 from_pretrained
         if base_model.lower() == "llama3":
-            model = InstructTimeLlama.from_pretrained(
-                model_path=weight_path,
-                ecgTokenizers=ts_tokenizers,
-                text_embedding=len(tokenizer.textTokenizer),
-                device=device,
+            # ① 先构建 **基座 + InstructTime 外壳**
+            base = InstructTimeLlama.from_pretrained(
+                    weight_path,
+                    ecgTokenizers=ts_tokenizers,
+                    text_embedding=len(tokenizer.textTokenizer),
+                    device=device,
             )
-        else:
+
+            # ② 把 AR-LoRA 注入
+            model = PeftModel.from_pretrained(base, weight_path)
+            print("Loaded AR-LoRA Delta-weights")
+            
+            # ③ 确保LoRA参数可训练 - 这是关键修复
+            for name, param in model.named_parameters():
+                if 'lora_' in name:
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = False
+            
+            sub_path = "lora"
+
+        else: # gpt2
             model = InstructTime.from_pretrained(
                 model_path=weight_path,
                 ecgTokenizers=ts_tokenizers,
                 text_embedding=len(tokenizer.textTokenizer),
                 device=device,
             )
+            sub_path = "no_frozen"
         print("Successfully loaded complete InstructTime model using from_pretrained method")
         
     except (FileNotFoundError, Exception) as e:
@@ -87,8 +104,19 @@ def initialize_model(device: str, tokenizer: MultiTokenizer, ts_tokenizers, weig
             new_output.weight.data[: len(tokenizer.textTokenizer)] = current_output.weight.data
             model.set_output_embeddings(new_output)
             model.config.vocab_size = tokenizer.vocabSize_all()
+            
+            # 添加LoRA配置
+            lora_config = LoraConfig(
+                task_type=TaskType.CAUSAL_LM,
+                r=16,
+                lora_alpha=32,
+                lora_dropout=0.1,
+                target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+                bias="none",
+            )
+            model = get_peft_model(model, lora_config)
+            sub_path = "lora"
         else:
-            # 回退到GPT2
             config = GPT2Config.from_pretrained("gpt2")
             model = InstructTime(config, ts_tokenizers, text_embedding=len(tokenizer.textTokenizer)).to(device)
             pretrained_gpt2_model = GPT2LMHeadModel.from_pretrained("gpt2")
@@ -100,8 +128,8 @@ def initialize_model(device: str, tokenizer: MultiTokenizer, ts_tokenizers, weig
             new_output.weight.data[: len(tokenizer.textTokenizer)] = current_output.weight.data
             model.set_output_embeddings(new_output)
             model.config.vocab_size = tokenizer.vocabSize_all()
+            sub_path = "no_frozen"
 
-    sub_path = "no_frozen"
     return model, sub_path
 
 
@@ -177,7 +205,7 @@ def train_model(model, args, train_loader, valid_loader, optimizer, scheduler, s
     patience_cnt = 0
     for epoch in range(args.epochs):
         step, train_losses = 0, 0.0
-        tqdm_iter = tqdm(train_loader, desc=f"GPT Epoch {epoch+1}", ncols=120)
+        tqdm_iter = tqdm(train_loader, desc=f"Epoch {epoch+1}", ncols=120)
         model.train()
         for data in tqdm_iter:
             input_ids = data["input_ids"].to(args.device)
@@ -211,7 +239,15 @@ def train_model(model, args, train_loader, valid_loader, optimizer, scheduler, s
         if val_f1 > best_f1:
             best_f1 = val_f1
             patience_cnt = 0
-            model.save_pretrained(os.path.join(run_path, "best_model"))
+            if isinstance(model, PeftModel):
+                # 保存基座 + 适配器
+                model.save_pretrained(os.path.join(run_path, "best_model"),
+                                    safe_serialization=True,
+                                    save_adapter=True)           # adapter
+                model.base_model.save_pretrained(os.path.join(run_path, "best_model"),
+                                                safe_serialization=True)   # base
+            else:
+                model.save_pretrained(os.path.join(run_path, "best_model"), safe_serialization=True)
         else:
             patience_cnt += 1
             if patience_cnt >= patience:
@@ -223,11 +259,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=2024)
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--model_path", type=str, default="./sft_model", help="path to save SFT model")
+    parser.add_argument("--model_path", type=str, default="./pheno_sft_model", help="path to save SFT model")
     parser.add_argument("--init_model_path", type=str, required=True, help="path to pretrained AR model")
     parser.add_argument("--dataset", type=str, default="pheno", choices=["mix", "ihm", "pheno"])
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--encoder_max_length", type=int, default=992)
+    parser.add_argument("--encoder_max_length", type=int, default=3000)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--warm_up_ratio", type=float, default=0.05)
     parser.add_argument("--epochs", type=int, default=10)
@@ -284,10 +320,26 @@ def main():
     os.makedirs(run_path, exist_ok=True)
     logger = setup_logging(run_path)
 
-    for param in model.parameters():
-        param.requires_grad = True
+    # 设置参数训练状态
+    if args.base_model.lower() == "llama3":
+        # 对于Llama3 LoRA模型，只训练可训练的参数
+        trainable_params = 0
+        all_params = 0
+        for param in model.parameters():
+            all_params += param.numel()
+            if param.requires_grad:
+                trainable_params += param.numel()
+        print(f"可训练参数: {trainable_params:,} / 总参数: {all_params:,} ({100 * trainable_params / all_params:.2f}%)")
+        optimizer = torch.optim.Adam([{"params": filter(lambda p: p.requires_grad, model.parameters()), "lr": args.lr}], weight_decay=1e-5)
+    else:
+        # 对于GPT-2模型，训练所有参数
+        for param in model.parameters():
+            param.requires_grad = True
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        all_params = sum(p.numel() for p in model.parameters())
+        print(f"可训练参数: {trainable_params:,} / 总参数: {all_params:,} ({100 * trainable_params / all_params:.2f}%)")
+        optimizer = torch.optim.Adam([{"params": model.parameters(), "lr": args.lr}], weight_decay=1e-5)
 
-    optimizer = torch.optim.Adam([{"params": model.parameters(), "lr": args.lr}], weight_decay=1e-5)
     scheduler = transformers.optimization.get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=args.epochs * len(train_loader) * args.warm_up_ratio,
@@ -323,11 +375,11 @@ if __name__ == "__main__":
 #     --device cuda:0 \
 #     --wandb
 
-# 使用 Llama3 基座的 AR 模型进行 SFT 训练
+# 使用 Llama3 基座的 AR 模型进行 SFT 训练 (LoRA微调)
 # python train_sft.py \
 #     --seed 42 \
 #     --base_model llama3 \
-#     --init_model_path ./production_model_llama3/no_frozen/run_0/best_model \
+#     --init_model_path ./production_model_llama3/lora/run_0/best_model \
 #     --dataset mix \
 #     --batch_size 16 \
 #     --encoder_max_length 992 \
@@ -347,14 +399,15 @@ if __name__ == "__main__":
 #     --epochs 15 \
 #     --model_path ./sft_model_gpt2_ihm
 
-# 单任务训练 - Phenotyping (Llama3)
+# 单任务训练 - Phenotyping (Llama3 LoRA微调)
 # python train_sft.py \
 #     --base_model llama3 \
-#     --init_model_path ./production_model_llama3/no_frozen/run_0/best_model \
+#     --init_model_path ./production_model_llama3/lora/run_0/best_model \
 #     --dataset pheno \
-#     --batch_size 16 \
-#     --epochs 12 \
-#     --model_path ./sft_model_llama3_pheno
+#     --batch_size 8 \
+#     --epochs 50 \
+#     --wandb
+#     --model_path ./pheno_sft_model_llama3_pheno
 
 # 快速测试 (smoke test) - GPT-2
 # python train_sft.py \
@@ -365,11 +418,11 @@ if __name__ == "__main__":
 #     --epochs 2 \
 #     --smoke_test
 
-# 快速测试 (smoke test) - Llama3
+# 快速测试 (smoke test) - Llama3 (LoRA微调)
 # python train_sft.py \
 #     --base_model llama3 \
-#     --init_model_path ./production_model_llama3/no_frozen/run_0/best_model \
-#     --dataset ihm \
+#     --init_model_path ./production_model/lora/run_0/best_model \
+#     --dataset pheno \
 #     --batch_size 4 \
 #     --epochs 2 \
 #     --smoke_test
@@ -378,5 +431,6 @@ if __name__ == "__main__":
 # 1. --init_model_path 应该指向AR训练后保存的完整InstructTime模型目录
 # 2. 该目录应包含 config.json 和模型权重文件(model.safetensors或pytorch_model.bin)
 # 3. 新的实现会首先尝试加载完整的InstructTime权重，如果失败则回退到基座模型初始化
-# 4. Llama3 模型需要更小的学习率和批次大小以避免显存溢出
+# 4. Llama3 模型现在使用LoRA微调，大幅减少显存使用和训练参数
 # 5. 确保 --base_model 参数与 AR 训练时使用的基座模型一致
+# 6. LoRA模型的路径会自动保存在 "lora" 子目录下

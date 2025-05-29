@@ -238,7 +238,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_len",    type=int, default=48)
     parser.add_argument("--ts_channels",type=int, default=34)
     parser.add_argument("--epochs",     type=int, default=50)
-    parser.add_argument("--lr",         type=float, default=1e-5)
+    parser.add_argument("--lr",         type=float, default=4e-5)
     parser.add_argument("--batch_size", type=int, default=128)
 
     # 运行环境
@@ -284,12 +284,6 @@ if __name__ == "__main__":
 # /home/ubuntu/Virginia/output_mimic3
 # /home/ubuntu/hcy50662/output_mimic3
 
-# 原始命令（可能导致过拟合）
-# python train_icu_codebook.py \
-#     --data_root   /home/ubuntu/hcy50662/output_mimic3 \
-#     --smoke_test \
-#     --epochs      1 \
-#     --use_wandb
 
 # 改进的训练命令（解决过拟合问题）
 # 1. 使用完整数据集训练（移除 --smoke_test）

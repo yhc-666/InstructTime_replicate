@@ -231,7 +231,7 @@ class InstructTime(GPT2LMHeadModel):
         """
         功能: 从保存的模型路径加载完整的InstructTime模型
         输入:
-            - model_path: 保存模型的路径，包含config.json和模型权重文件(pytorch_model.bin或model.safetensors)
+            - model_path: 保存模型的路径，包含config.json和模型权重文件
             - ecgTokenizers: 时间序列tokenizer列表
             - text_embedding: 文本词表大小
             - device: 设备
@@ -239,6 +239,7 @@ class InstructTime(GPT2LMHeadModel):
             - 加载完整权重的InstructTime模型实例
         """
         import os
+        import json
         from transformers import GPT2Config
         
         # 加载配置
@@ -299,7 +300,7 @@ class InstructTime(GPT2LMHeadModel):
                 break
         
         if state_dict is None:
-            raise FileNotFoundError(f"Model weights file not found. Tried: {model_weights_paths}")
+            raise FileNotFoundError(f"Model weights file not found in {model_path}")
         
         # 加载权重到模型
         missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
@@ -536,6 +537,7 @@ class InstructTimeLlama(LlamaForCausalLM):
     ):
         """加载保存的 InstructTimeLlama 权重（与 GPT2 版逻辑保持一致）"""
         import os
+        import json
         # 1. 读取 LlamaConfig
         config = LlamaConfig.from_pretrained(model_path)
 
@@ -554,30 +556,74 @@ class InstructTimeLlama(LlamaForCausalLM):
         model.set_output_embeddings(new_output)
         model.config.vocab_size = multi_tokenizer.vocabSize_all()
 
-        # 5. 加载权重文件（支持 safetensors / pytorch）
-        candidate_paths = [
-            os.path.join(model_path, "model.safetensors"),
-            os.path.join(model_path, "pytorch_model.bin"),
-            os.path.join(model_path, "model.bin"),
-        ]
-
+        # 5. 加载权重文件（支持分片 safetensors / pytorch）
         state_dict = None
-        for p in candidate_paths:
-            if os.path.exists(p):
-                if p.endswith(".safetensors"):
-                    try:
-                        from safetensors.torch import load_file
-                        state_dict = load_file(p, device=device)
-                    except ImportError:
-                        continue
-                else:
-                    state_dict = torch.load(p, map_location=device)
-                break
+        loaded_path = None
+        
+        # 首先检查是否有分片的safetensors文件
+        index_path = os.path.join(model_path, "model.safetensors.index.json")
+        if os.path.exists(index_path):
+            try:
+                from safetensors.torch import load_file
+                # 加载分片索引文件
+                with open(index_path, 'r') as f:
+                    index_data = json.load(f)
+                
+                state_dict = {}
+                weight_map = index_data.get("weight_map", {})
+                
+                # 获取所有分片文件
+                shard_files = set(weight_map.values())
+                
+                # 逐个加载分片文件
+                for shard_file in shard_files:
+                    shard_path = os.path.join(model_path, shard_file)
+                    if os.path.exists(shard_path):
+                        shard_state = load_file(shard_path, device=device)
+                        state_dict.update(shard_state)
+                        
+                loaded_path = f"分片safetensors文件: {len(shard_files)}个文件"
+                print(f"Loading model weights from sharded safetensors: {len(shard_files)} files")
+                
+            except (ImportError, json.JSONDecodeError, KeyError) as e:
+                print(f"Warning: Failed to load sharded safetensors: {e}")
+                state_dict = None
+        
+        # 如果分片加载失败，尝试单个文件
+        if state_dict is None:
+            candidate_paths = [
+                os.path.join(model_path, "model.safetensors"),
+                os.path.join(model_path, "pytorch_model.bin"),
+                os.path.join(model_path, "model.bin"),
+            ]
+
+            for p in candidate_paths:
+                if os.path.exists(p):
+                    loaded_path = p
+                    if p.endswith(".safetensors"):
+                        try:
+                            from safetensors.torch import load_file
+                            state_dict = load_file(p, device=device)
+                            print(f"Loading model weights from safetensors: {p}")
+                        except ImportError:
+                            print("Warning: safetensors not installed, trying to load as pytorch format")
+                            continue
+                    else:
+                        state_dict = torch.load(p, map_location=device)
+                        print(f"Loading model weights from pytorch format: {p}")
+                    break
 
         if state_dict is None:
-            raise FileNotFoundError(f"未找到模型权重文件, 尝试路径: {candidate_paths}")
+            raise FileNotFoundError(f"未找到模型权重文件在 {model_path}")
 
-        model.load_state_dict(state_dict, strict=False)
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+        
+        if missing_keys:
+            print(f"Warning: Missing keys when loading InstructTimeLlama model: {missing_keys}")
+        if unexpected_keys:
+            print(f"Warning: Unexpected keys when loading InstructTimeLlama model: {unexpected_keys}")
+            
+        print(f"Successfully loaded complete InstructTimeLlama model from {loaded_path}")
 
         model.to(device)
         return model

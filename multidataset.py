@@ -102,7 +102,7 @@ class _BaseDataset(Dataset):
                 self.samples.append(
                     {
                         "ts_ids": item["ts_ids"],
-                        "notes": item["notes"][-2:-1],
+                        "notes": item["notes"][-3:-1],
                         "label": item["label"],
                         "task": task,
                     }
