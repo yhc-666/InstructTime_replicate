@@ -152,7 +152,7 @@ class _BaseDataset(Dataset):
             )
             pos = [i for i, v in enumerate(sample["label"]) if int(v) == 1]
             labels = [PHENO_LABELS[i] for i in pos]
-            label_text = "The patient presents " + " and ".join(labels)
+            label_text = "The patient presents " + " , ".join(labels)
 
         prompt_text = (
             f"{instruction}\n\nDoctors' notes:\n{notes_text}\n\nVital-sign time-series:\n"

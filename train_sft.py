@@ -95,7 +95,7 @@ def initialize_model(device: str, tokenizer: MultiTokenizer, ts_tokenizers, weig
         if base_model.lower() == "llama3":
             config = LlamaConfig.from_pretrained("meta-llama/Meta-Llama-3-8B")
             model = InstructTimeLlama(config, ts_tokenizers, text_embedding=len(tokenizer.textTokenizer)).to(device)
-            pretrained_llama_model = LlamaForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8B")
+            pretrained_llama_model = LlamaForCausalLM.from_pretrained("meta-llama/Meta-Llama-3-8B", torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2")
             model.load_state_dict(pretrained_llama_model.state_dict(), strict=False)
 
             model.resize_token_embeddings(len(tokenizer.textTokenizer))
@@ -188,6 +188,7 @@ def validate_sft(model, loader, device, tokenizer, dataset, logger):
                     gold_pheno.append(l.numpy().tolist())
     print('total token length:', len(last_response_token_ids))
     print('last response:', last_response_text)
+    logger.info(f'last response: {last_response_text}')
     print('last response token ids:', last_response_token_ids)
     results = {}
     if pred_ihm:
@@ -203,6 +204,8 @@ def train_model(model, args, train_loader, valid_loader, optimizer, scheduler, s
     best_f1 = -1.0
     patience = 3
     patience_cnt = 0
+    global_step = 0  # 添加全局步数计数器
+    
     for epoch in range(args.epochs):
         step, train_losses = 0, 0.0
         tqdm_iter = tqdm(train_loader, desc=f"Epoch {epoch+1}", ncols=120)
@@ -221,7 +224,20 @@ def train_model(model, args, train_loader, valid_loader, optimizer, scheduler, s
             loss_value = outputs.loss.cpu().item()
             train_losses += loss_value
             step += 1
+            global_step += 1
             tqdm_iter.set_postfix({"loss": format(train_losses / step, ".4f")})
+            
+            # 每隔log_steps步记录loss到wandb
+            if args.wandb and global_step % args.log_steps == 0:
+                current_avg_loss = train_losses / step
+                wandb.log({
+                    "global_step": global_step,
+                    "train_loss_step": loss_value,  # 当前步的loss
+                    "train_loss_avg": current_avg_loss,  # 当前epoch的平均loss
+                    "learning_rate": scheduler.get_last_lr()[0],  # 当前学习率
+                    "epoch": epoch + 1
+                })
+                
         train_loss = train_losses / step
         logger.info(f"Epoch {epoch+1}\nLoss: {train_loss:.4f}")
         metrics = validate_sft(model, valid_loader, args.device, tokenizer, args.dataset, logger)
@@ -233,8 +249,14 @@ def train_model(model, args, train_loader, valid_loader, optimizer, scheduler, s
         else:
             val_f1 = (metrics["ihm"]["f1"] + metrics["pheno"]["f1"]) / 2
 
+        # 在epoch结束时记录epoch级别的指标
         if args.wandb:
-            wandb.log({"epoch": epoch + 1, "train_loss": train_loss, "val_f1": val_f1})
+            wandb.log({
+                "epoch": epoch + 1, 
+                "epoch_train_loss": train_loss, 
+                "val_f1": val_f1,
+                "global_step": global_step
+            })
 
         if val_f1 > best_f1:
             best_f1 = val_f1
@@ -272,6 +294,7 @@ def main():
     parser.add_argument("--smoke_test", action="store_true")
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--base_model", type=str, default="gpt2", choices=["gpt2", "llama3"])
+    parser.add_argument("--log_steps", type=int, default=100, help="Log training loss to wandb every N steps")
     args = parser.parse_args()
 
     seed_everything(args.seed)
@@ -373,6 +396,7 @@ if __name__ == "__main__":
 #     --epochs 10 \
 #     --model_path ./sft_model_gpt2 \
 #     --device cuda:0 \
+#     --log_steps 50 \
 #     --wandb
 
 # 使用 Llama3 基座的 AR 模型进行 SFT 训练 (LoRA微调)
@@ -388,6 +412,7 @@ if __name__ == "__main__":
 #     --epochs 8 \
 #     --model_path ./sft_model_llama3 \
 #     --device cuda:0 \
+#     --log_steps 100 \
 #     --wandb
 
 # 单任务训练 - IHM (GPT-2)
@@ -397,6 +422,7 @@ if __name__ == "__main__":
 #     --dataset ihm \
 #     --batch_size 32 \
 #     --epochs 15 \
+#     --log_steps 50 \
 #     --model_path ./sft_model_gpt2_ihm
 
 # 单任务训练 - Phenotyping (Llama3 LoRA微调)
@@ -406,6 +432,7 @@ if __name__ == "__main__":
 #     --dataset pheno \
 #     --batch_size 8 \
 #     --epochs 50 \
+#     --log_steps 25 \
 #     --wandb
 #     --model_path ./pheno_sft_model_llama3_pheno
 
